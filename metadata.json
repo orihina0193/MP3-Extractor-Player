@@ -1,0 +1,8 @@
+{
+  "name": "Remix YouTube MP3 Extractor \u0026 Player",
+  "description": "YouTube動画をM4A高音質オーディオへ抽出し、ブラウザ内に安全にキャッシュ保存して、オフライン再生やZIP形式でのバックアップ・復元ができるプレミアム音楽プレイヤー。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

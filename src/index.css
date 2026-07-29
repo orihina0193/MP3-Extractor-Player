@@ -1,0 +1,32 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --animate-spin-slow: spin 15s linear infinite;
+  --color-orange-accent: #FF5F1F;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: #050505;
+    color: #e0e0e0;
+  }
+}
+
+/* Custom glow utility */
+.glow-orange {
+  box-shadow: 0 0 15px rgba(255, 95, 31, 0.35);
+}
+
+.glow-orange-dot {
+  box-shadow: 0 0 8px #FF5F1F;
+}
+
+/* Custom radial background glow */
+.radial-glow {
+  background-image: radial-gradient(circle at 50% -20%, rgba(255, 95, 31, 0.18) 0%, transparent 60%);
+}
+
