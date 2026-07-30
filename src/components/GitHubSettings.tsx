@@ -31,7 +31,7 @@ import {
   rebuildAndUploadMasterIndex
 } from "../lib/githubSync";
 
-import { getTracks, saveTrack, findDuplicateTrack } from "../lib/db";
+import { getTracks, saveTrack, findDuplicateTrack, clearAllTracks } from "../lib/db";
 import { Track, GitHubConfig } from "../types";
 import { requestWakeLock, releaseWakeLock } from "../lib/wakeLock";
 
@@ -292,20 +292,25 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         const audioFilePath = item.audioFilePath || `audio/${meta.id}.m4a`;
 
         try {
-          // GitHub PATヘッダー付きで安全に音声Blobを取得 (プライベートリポジトリにも完全対応)
+          // GitHub PATヘッダー & SHA付きで安全に音声Blobを取得 (プライベートリポジトリ＆1MB超のバイナリにも完全対応)
           let blob: Blob | null = null;
           try {
-            blob = await fetchGitHubFileBlob(config, audioFilePath);
+            blob = await fetchGitHubFileBlob(config, audioFilePath, item.audioFileSha);
           } catch (blobErr) {
             if (item.audioBlobUrl) {
-              const res = await fetch(item.audioBlobUrl);
-              if (res.ok) {
-                blob = await res.blob();
-              }
+              try {
+                const res = await fetch(item.audioBlobUrl, {
+                  headers: config.pat ? { Authorization: `Bearer ${config.pat.trim()}` } : {},
+                });
+                if (res.ok) {
+                  blob = await res.blob();
+                }
+              } catch (_) {}
             }
           }
 
-          if (blob && blob.size > 0) {
+          // 1000バイト以上の有効な音声バイナリか検証 (404エラーテキスト等の破損ファイルの混入を遮断)
+          if (blob && blob.size > 1000) {
             const newTrack: Track = {
               id: meta.id,
               title: meta.title || "GitHub Audio",
@@ -320,7 +325,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
             existingTracks.push(newTrack);
             importedCount++;
           } else {
-            console.warn(`0バイトまたは音声Blobの取得失敗: ${meta.id}`);
+            console.warn(`無効な音声データ(サイズ: ${blob?.size || 0} bytes)のためスキップ: ${meta.id}`);
             failedCount++;
           }
         } catch (dlErr) {
@@ -330,7 +335,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       }
 
       showMsg(
-        `クラウドからの取り込み完了: 全${cloudTracks.length}曲中 ${importedCount}曲を新たにローカルへ保存しました！${
+        `クラウドからの取り込み完了: 全${cloudTracks.length}曲中 ${importedCount}曲をローカルへ保存・復元しました！${
           skippedCount > 0 ? ` (${skippedCount}曲は保存済みのためスキップ)` : ""
         }${failedCount > 0 ? ` (${failedCount}曲音声ダウンロード失敗)` : ""}`,
         importedCount > 0 || skippedCount > 0 ? "success" : "error"
@@ -342,6 +347,21 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       await releaseWakeLock();
       setFetching(false);
       setFetchProgress("");
+    }
+  };
+
+  const handleClearAndFetchFromGitHub = async () => {
+    if (!window.confirm("ローカルに保存されている楽曲を全て削除し、GitHub上の全171+曲をキレイに再ダウンロードして完全同期しますか？")) {
+      return;
+    }
+    try {
+      setFetchProgress("ローカルデータベースをクリア中...");
+      await clearAllTracks();
+      onRefresh();
+      setForceOverwriteOnPull(true);
+      await handleFetchFromGitHub();
+    } catch (err: any) {
+      showMsg("ローカルデータベースのクリアに失敗しました: " + err.message, "error");
     }
   };
 
@@ -736,12 +756,31 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
                     <span>「{config.repo || "保管用リポ"}」から全楽曲を取得</span>
                   </div>
                   <span className="text-[10px] font-normal opacity-80 font-sans">
-                    クラウド上の楽曲をプレイヤーに読み込む
+                    クラウド上の楽曲をプレイヤーに追加読み込み
                   </span>
                 </>
               )}
             </button>
           </div>
+
+          {/* Clean Reset & Full Re-sync Button */}
+          <button
+            onClick={handleClearAndFetchFromGitHub}
+            disabled={syncingSource || syncing || fetching || !isGitHubConfigured(config)}
+            className="w-full flex items-center justify-center gap-2 bg-rose-500/20 hover:bg-rose-500 border border-rose-500/40 hover:text-black disabled:opacity-40 text-rose-300 py-3.5 px-4 rounded-2xl font-bold text-xs transition cursor-pointer mt-3 shadow-md"
+          >
+            {fetching ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>{fetchProgress || "全171曲を再同期中..."}</span>
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-4 h-4" />
+                <span>🔥 ローカルを全消去してGitHubから全曲再同期（171+曲をキレイに完全復元）</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
     </div>
