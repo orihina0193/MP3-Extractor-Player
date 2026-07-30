@@ -474,6 +474,18 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
           const loadTrack = async () => {
             try {
               setIsPreparing(true);
+
+              if (!currentTrack.blob || currentTrack.blob.size < 1000) {
+                console.warn(`Track ${currentTrack.id} has invalid blob size:`, currentTrack.blob?.size);
+                if (active) {
+                  setPlaybackError(
+                    `「${currentTrack.title}」の音声データが破損または未取得です。(サイズ: ${currentTrack.blob?.size || 0} bytes)。\n画面下の「GitHub設定」から「🔥 ローカルを全消去してGitHubから全曲再同期」を実行してください。`
+                  );
+                  setIsPlaying(false);
+                }
+                return;
+              }
+
               const detectedType = await detectMimeType(currentTrack.blob);
               if (!active) return;
 
