@@ -324,42 +324,35 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
         console.warn(`[AudioRecovery] 自動リカバリーを実行中: 「${track.title}」(試行 ${retryCountRef.current}/3)...`);
 
         try {
-          // 1. Pause and completely reset audio element source pipeline
-          audio.pause();
-          audio.removeAttribute("src");
-          audio.load();
+          const oldUrl = objectUrlRef.current;
 
-          // 2. Revoke old Object URL to release decoder buffer
-          if (objectUrlRef.current) {
-            if (objectUrlRef.current.startsWith("blob:")) {
-              URL.revokeObjectURL(objectUrlRef.current);
-            }
-            objectUrlRef.current = null;
-          }
-
-          // 3. Verify track blob
+          // 1. Verify track blob
           if (!track.blob || track.blob.size < 1000) {
             console.error(`[AudioRecovery] Blobが不正または破損しています: ${track.id}`);
             return false;
           }
 
-          // 4. Create fresh Blob URL
+          // 2. Create fresh Blob URL
           const detectedType = await detectMimeType(track.blob);
           const freshBlob = new Blob([track.blob], { type: detectedType });
           const freshUrl = URL.createObjectURL(freshBlob);
           objectUrlRef.current = freshUrl;
 
-          // 5. Re-assign source and resume play
+          // 3. Directly assign new src
           loadedTrackIdRef.current = track.id;
           audio.src = freshUrl;
           audio.volume = isMutedRef.current ? 0 : volumeRef.current;
-          audio.load();
 
           if (isPlayingRef.current) {
             if (silentAudioRef.current && silentAudioRef.current.paused) {
               silentAudioRef.current.play().catch((e) => console.warn("Silent audio play failed", e));
             }
             await audio.play();
+          }
+
+          // Safely revoke old URL
+          if (oldUrl && oldUrl !== freshUrl && oldUrl.startsWith("blob:")) {
+            setTimeout(() => { try { URL.revokeObjectURL(oldUrl); } catch (_) {} }, 2000);
           }
 
           console.log(`[AudioRecovery] 「${track.title}」の自動リカバリー再生に成功しました！`);
@@ -493,29 +486,15 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
       preloadedForTrackIdRef.current = null;
 
       if (loadedTrackIdRef.current !== currentTrack.id) {
-        // Stop previous audio playback & clean up browser decoder pipeline before setting new src
-        try {
-          audioRef.current.pause();
-          audioRef.current.removeAttribute("src");
-          audioRef.current.load();
-        } catch (_) {}
+        // Safely update audio src without destroying iOS background Audio Session
+        const prevBlobUrl = objectUrlRef.current;
 
         // If we already have a preloaded source for this track, apply it synchronously to preserve iOS audio thread
         if (preloadedTrackIdRef.current === currentTrack.id && preloadedUrlRef.current) {
           console.log(`Using preloaded source for track: ${currentTrack.title}`);
           const sourceUrl = preloadedUrlRef.current;
 
-          if (objectUrlRef.current && objectUrlRef.current !== sourceUrl) {
-            if (objectUrlRef.current.startsWith("blob:")) {
-              URL.revokeObjectURL(objectUrlRef.current);
-            }
-          }
-
-          if (sourceUrl.startsWith("blob:")) {
-            objectUrlRef.current = sourceUrl;
-          } else {
-            objectUrlRef.current = null;
-          }
+          objectUrlRef.current = sourceUrl;
 
           // Consume the preloaded reference
           preloadedTrackIdRef.current = null;
@@ -525,7 +504,6 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
 
           audioRef.current.src = sourceUrl;
           audioRef.current.volume = isMuted ? 0 : volume;
-          audioRef.current.load();
 
           if (isPlaying) {
             if (silentAudioRef.current && silentAudioRef.current.paused) {
@@ -533,26 +511,19 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
             }
             audioRef.current.play().catch(async (err) => {
               console.warn("Autoplay failed, attempting automatic recovery...", err);
-              if (objectUrlRef.current) {
-                try {
-                  audioRef.current?.pause();
-                  audioRef.current?.removeAttribute("src");
-                  audioRef.current?.load();
-                } catch (_) {}
-              }
               setIsPlaying(false);
             });
           }
           setIsPreparing(false);
+
+          // Revoke previous blob URL safely after 2 seconds
+          if (prevBlobUrl && prevBlobUrl !== sourceUrl && prevBlobUrl.startsWith("blob:")) {
+            setTimeout(() => {
+              try { URL.revokeObjectURL(prevBlobUrl); } catch (_) {}
+            }, 2000);
+          }
         } else {
           // Normal asynchronous loading for non-preloaded tracks (e.g. manual tapping)
-          if (objectUrlRef.current) {
-            if (objectUrlRef.current.startsWith("blob:")) {
-              URL.revokeObjectURL(objectUrlRef.current);
-            }
-            objectUrlRef.current = null;
-          }
-
           const loadTrack = async () => {
             try {
               setIsPreparing(true);
@@ -581,7 +552,6 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
                 loadedTrackIdRef.current = currentTrack.id; // Mark as loaded synchronously
                 audioRef.current.src = sourceUrl;
                 audioRef.current.volume = isMuted ? 0 : volume;
-                audioRef.current.load();
 
                 if (isPlaying) {
                   if (silentAudioRef.current && silentAudioRef.current.paused) {
@@ -592,6 +562,13 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
                     setIsPlaying(false);
                   });
                 }
+              }
+
+              // Revoke previous blob URL safely after 2 seconds
+              if (prevBlobUrl && prevBlobUrl !== sourceUrl && prevBlobUrl.startsWith("blob:")) {
+                setTimeout(() => {
+                  try { URL.revokeObjectURL(prevBlobUrl); } catch (_) {}
+                }, 2000);
               }
             } catch (err) {
               console.error("Error setting up playback source:", err);
