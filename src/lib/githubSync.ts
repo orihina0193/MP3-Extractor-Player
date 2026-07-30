@@ -62,35 +62,64 @@ function cleanFolder(folder?: string): string {
  */
 export async function fetchGitHubFileBlob(
   config: GitHubConfig,
-  filePath: string
+  filePath: string,
+  fileSha?: string
 ): Promise<Blob> {
   const cleanPath = filePath.replace(/^\/+/, "");
-  const apiUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${cleanPath}?ref=${config.branch || "main"}`;
-  
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github.v3.raw",
-  };
+  const headers: Record<string, string> = {};
   if (config.pat && config.pat.trim()) {
     headers.Authorization = `Bearer ${config.pat.trim()}`;
   }
 
+  // 1. If we have fileSha, try Git Blobs API (supports up to 100MB files for both public/private repos!)
+  if (fileSha) {
+    try {
+      const blobUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/git/blobs/${fileSha}`;
+      const res = await fetch(blobUrl, {
+        headers: {
+          ...headers,
+          Accept: "application/vnd.github.v3.raw",
+        },
+      });
+      if (res.ok) {
+        const b = await res.blob();
+        if (b.size > 100) return b;
+      }
+    } catch (e) {
+      console.warn(`Git Blobs API fetch failed for SHA ${fileSha}:`, e);
+    }
+  }
+
+  // 2. Try raw.githubusercontent.com WITH Authorization header (supports private repos & large files)
   try {
-    const res = await fetch(apiUrl, { headers });
-    if (res.ok) {
-      return await res.blob();
+    const rawUrl = `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch || "main"}/${cleanPath}`;
+    const rawRes = await fetch(rawUrl, { headers });
+    if (rawRes.ok) {
+      const b = await rawRes.blob();
+      if (b.size > 100) return b;
     }
   } catch (e) {
-    console.warn(`API raw fetch failed for ${filePath}, trying fallback:`, e);
+    console.warn(`raw.githubusercontent fetch failed for ${filePath}:`, e);
   }
 
-  // Fallback to raw.githubusercontent.com (for public repos)
-  const rawUrl = `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch || "main"}/${cleanPath}`;
-  const rawRes = await fetch(rawUrl);
-  if (rawRes.ok) {
-    return await rawRes.blob();
+  // 3. Try GitHub Contents API with vnd.github.v3.raw (for small files)
+  try {
+    const apiUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${cleanPath}?ref=${config.branch || "main"}`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        ...headers,
+        Accept: "application/vnd.github.v3.raw",
+      },
+    });
+    if (res.ok) {
+      const b = await res.blob();
+      if (b.size > 100) return b;
+    }
+  } catch (e) {
+    console.warn(`API raw contents fetch failed for ${filePath}:`, e);
   }
 
-  throw new Error(`音声ファイル「${filePath}」のダウンロードに失敗しました。PAT権限を確認してください。`);
+  throw new Error(`音声ファイル「${filePath}」の取得に失敗しました。PAT権限を確認してください。`);
 }
 
 /**
@@ -406,7 +435,7 @@ async function updateGitHubMasterIndex(
 export async function fetchTracksFromGitHub(
   config: GitHubConfig,
   onProgress?: (msg: string) => void
-): Promise<Array<{ meta: any; audioFilePath?: string; audioBlobUrl?: string }>> {
+): Promise<Array<{ meta: any; audioFilePath?: string; audioFileSha?: string; audioBlobUrl?: string }>> {
   if (!isGitHubConfigured(config)) {
     throw new Error("GitHub設定が必要です。");
   }
@@ -415,7 +444,7 @@ export async function fetchTracksFromGitHub(
   const candidateFolders = Array.from(new Set([primaryFolder, "audio", "tracks"]));
 
   for (const folder of candidateFolders) {
-    const trackMap = new Map<string, { meta: any; audioFilePath?: string; audioBlobUrl?: string }>();
+    const trackMap = new Map<string, { meta: any; audioFilePath?: string; audioFileSha?: string; audioBlobUrl?: string }>();
 
     onProgress?.(`GitHubツリー構造をスキャン中 (${folder}/)...`);
 
@@ -433,38 +462,82 @@ export async function fetchTracksFromGitHub(
 
       if (treeRes.ok) {
         const treeData = await treeRes.json();
-        const tree: Array<{ path: string; type: string }> = treeData.tree || [];
+        const tree: Array<{ path: string; type: string; sha?: string; size?: number }> = treeData.tree || [];
+
+        // Filter audio files in target folder
+        const audioExtensions = [".m4a", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".webm"];
+        const audioTreeItems = tree.filter(
+          (item) =>
+            item.type === "blob" &&
+            item.path.startsWith(`${folder}/`) &&
+            audioExtensions.some((ext) => item.path.toLowerCase().endsWith(ext))
+        );
 
         // Filter json metadata files in target folder
-        const targetJsonPaths = tree
-          .filter(
-            (item) =>
-              item.type === "blob" &&
-              item.path.startsWith(`${folder}/`) &&
-              item.path.endsWith(".json") &&
-              !item.path.endsWith("tracks.json")
-          )
-          .map((item) => item.path);
+        const jsonTreeItems = tree.filter(
+          (item) =>
+            item.type === "blob" &&
+            item.path.startsWith(`${folder}/`) &&
+            item.path.endsWith(".json") &&
+            !item.path.endsWith("tracks.json")
+        );
 
-        if (targetJsonPaths.length > 0) {
-          onProgress?.(`GitHub上で ${targetJsonPaths.length}件の個別楽曲定義ファイル (.json) を検出！読み込み中...`);
-
-          for (let i = 0; i < targetJsonPaths.length; i++) {
-            const jsonPath = targetJsonPaths[i];
-            if (i % 10 === 0 || i === targetJsonPaths.length - 1) {
-              onProgress?.(`[${i + 1}/${targetJsonPaths.length}] メタデータ取得中...`);
+        // First load all individual JSON metadata files
+        const jsonMetaMap = new Map<string, any>();
+        if (jsonTreeItems.length > 0) {
+          onProgress?.(`GitHub上の ${jsonTreeItems.length}件の定義ファイル (.json) を読み込み中...`);
+          for (let i = 0; i < jsonTreeItems.length; i++) {
+            const jsonItem = jsonTreeItems[i];
+            if (i % 15 === 0 || i === jsonTreeItems.length - 1) {
+              onProgress?.(`[${i + 1}/${jsonTreeItems.length}] メタデータ読込中...`);
             }
             try {
-              const fileText = await fetchGitHubFileText(config, jsonPath);
+              const fileText = await fetchGitHubFileText(config, jsonItem.path);
               const meta = JSON.parse(fileText);
               if (meta && meta.id) {
-                trackMap.set(String(meta.id), {
-                  meta,
-                  audioFilePath: `${folder}/${meta.id}.m4a`,
-                  audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
-                });
+                jsonMetaMap.set(String(meta.id), meta);
+                const baseName = jsonItem.path.split("/").pop()?.replace(/\.json$/i, "");
+                if (baseName) jsonMetaMap.set(baseName, meta);
               }
             } catch (_) {}
+          }
+        }
+
+        // Process all audio files found in repository
+        if (audioTreeItems.length > 0) {
+          onProgress?.(`GitHub上で ${audioTreeItems.length}件の音声ファイルを検出！楽曲情報とバインド中...`);
+          for (const audioItem of audioTreeItems) {
+            const filename = audioItem.path.split("/").pop() || "";
+            const baseName = filename.replace(/\.(m4a|mp3|wav|aac|flac|ogg|webm)$/i, "");
+            
+            // Try matching metadata
+            const meta = jsonMetaMap.get(baseName) || jsonMetaMap.get(filename) || {
+              id: baseName,
+              title: baseName.replace(/^track_/, "").replace(/_/g, " "),
+              artist: "不明なアーティスト",
+              genre: "邦楽",
+              addedAt: Date.now(),
+            };
+
+            trackMap.set(String(meta.id), {
+              meta,
+              audioFilePath: audioItem.path,
+              audioFileSha: audioItem.sha,
+              audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${audioItem.path}`,
+            });
+          }
+        } else if (jsonTreeItems.length > 0) {
+          // Fallback if audio files are outside folder or named differently
+          for (const jsonItem of jsonTreeItems) {
+            const baseName = jsonItem.path.split("/").pop()?.replace(/\.json$/i, "");
+            const meta = jsonMetaMap.get(baseName);
+            if (meta && meta.id) {
+              trackMap.set(String(meta.id), {
+                meta,
+                audioFilePath: `${folder}/${meta.id}.m4a`,
+                audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
+              });
+            }
           }
         }
       }
@@ -472,7 +545,7 @@ export async function fetchTracksFromGitHub(
       console.warn("Git Trees API scan failed:", treeErr);
     }
 
-    // 2. Also check tracks.json master index to complement any missing tracks
+    // 2. Also check tracks.json master index to complement any missing metadata
     const indexFilePath = `${folder}/tracks.json`;
     try {
       const indexText = await fetchGitHubFileText(config, indexFilePath);
@@ -480,12 +553,18 @@ export async function fetchTracksFromGitHub(
         const trackList = JSON.parse(indexText) as any[];
         if (Array.isArray(trackList)) {
           for (const meta of trackList) {
-            if (meta && meta.id && !trackMap.has(String(meta.id))) {
-              trackMap.set(String(meta.id), {
-                meta,
-                audioFilePath: `${folder}/${meta.id}.m4a`,
-                audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
-              });
+            if (meta && meta.id) {
+              const key = String(meta.id);
+              if (!trackMap.has(key)) {
+                trackMap.set(key, {
+                  meta,
+                  audioFilePath: `${folder}/${meta.id}.m4a`,
+                  audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
+                });
+              } else {
+                const existing = trackMap.get(key)!;
+                existing.meta = { ...meta, ...existing.meta };
+              }
             }
           }
         }
