@@ -87,6 +87,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         "src/components/BackupRestore.tsx",
         "src/components/GitHubSettings.tsx",
         ".github/workflows/deploy.yml",
+        "README.md",
       ];
 
       const validFiles: Record<string, string> = {};
