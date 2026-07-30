@@ -78,7 +78,8 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
     setIsImporting(true);
     try {
       const result = await importBackup(file);
-      showMsg(`復元完了: ${result.totalCount}個中 ${result.successCount}個のトラックを復元しました！`, "success");
+      const skipText = result.skippedCount > 0 ? ` (${result.skippedCount}個は重複のためスキップ)` : "";
+      showMsg(`復元完了: ${result.totalCount}個中 ${result.successCount}個のトラックを復元しました！${skipText}`, "success");
       onRefresh();
     } catch (err: any) {
       console.error(err);
@@ -103,8 +104,9 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
         setConversionProgress({ current, total });
       });
       setConvertedZipBlob(result.convertedZipBlob);
+      const skipText = result.skippedCount > 0 ? ` (${result.skippedCount}個は重複のためスキップ)` : "";
       showMsg(
-        `変換・合流完了: 他アプリのバックアップから ${result.totalCount}個中 ${result.successCount}個のトラックを検出し、SoundBoxライブラリに直接マージしました！`,
+        `変換・合流完了: 他アプリのバックアップから ${result.totalCount}個中 ${result.successCount}個のトラックをライブラリにマージしました！${skipText}`,
         "success"
       );
       onRefresh();
