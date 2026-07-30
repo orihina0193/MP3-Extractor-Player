@@ -1,4 +1,4 @@
-import __vite__cjsImport0_jszip from "/node_modules/.vite/deps/jszip.js?v=1f31155a"; const JSZip = __vite__cjsImport0_jszip.__esModule ? __vite__cjsImport0_jszip.default : __vite__cjsImport0_jszip;
+import __vite__cjsImport0_jszip from "/node_modules/.vite/deps/jszip.js?v=17b4195c"; const JSZip = __vite__cjsImport0_jszip.__esModule ? __vite__cjsImport0_jszip.default : __vite__cjsImport0_jszip;
 import { saveTrack, getTracks } from "/src/lib/db.ts";
 import { detectMimeType } from "/src/lib/audioHelper.ts";
 export async function exportBackup(onProgress) {
