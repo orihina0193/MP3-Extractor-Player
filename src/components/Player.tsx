@@ -150,6 +150,7 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
   const activePlaylistRef = useRef(activePlaylist);
   const volumeRef = useRef(volume);
   const isMutedRef = useRef(isMuted);
+  const retryCountRef = useRef<number>(0);
 
   currentTrackRef.current = currentTrack;
   isPlayingRef.current = isPlaying;
@@ -312,7 +313,67 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
     };
     const handleDurationChange = () => setDuration(audio.duration || 0);
     const handleEnded = () => handleTrackEnded();
-    const handleError = () => {
+
+    const recoverAudioPlayback = async (): Promise<boolean> => {
+      const track = currentTrackRef.current;
+      const audio = audioRef.current;
+      if (!track || !audio) return false;
+
+      if (retryCountRef.current < 3) {
+        retryCountRef.current += 1;
+        console.warn(`[AudioRecovery] 自動リカバリーを実行中: 「${track.title}」(試行 ${retryCountRef.current}/3)...`);
+
+        try {
+          // 1. Pause and completely reset audio element source pipeline
+          audio.pause();
+          audio.removeAttribute("src");
+          audio.load();
+
+          // 2. Revoke old Object URL to release decoder buffer
+          if (objectUrlRef.current) {
+            if (objectUrlRef.current.startsWith("blob:")) {
+              URL.revokeObjectURL(objectUrlRef.current);
+            }
+            objectUrlRef.current = null;
+          }
+
+          // 3. Verify track blob
+          if (!track.blob || track.blob.size < 1000) {
+            console.error(`[AudioRecovery] Blobが不正または破損しています: ${track.id}`);
+            return false;
+          }
+
+          // 4. Create fresh Blob URL
+          const detectedType = await detectMimeType(track.blob);
+          const freshBlob = new Blob([track.blob], { type: detectedType });
+          const freshUrl = URL.createObjectURL(freshBlob);
+          objectUrlRef.current = freshUrl;
+
+          // 5. Re-assign source and resume play
+          loadedTrackIdRef.current = track.id;
+          audio.src = freshUrl;
+          audio.volume = isMutedRef.current ? 0 : volumeRef.current;
+          audio.load();
+
+          if (isPlayingRef.current) {
+            if (silentAudioRef.current && silentAudioRef.current.paused) {
+              silentAudioRef.current.play().catch((e) => console.warn("Silent audio play failed", e));
+            }
+            await audio.play();
+          }
+
+          console.log(`[AudioRecovery] 「${track.title}」の自動リカバリー再生に成功しました！`);
+          setPlaybackError(null);
+          return true;
+        } catch (recoveryErr) {
+          console.error("[AudioRecovery] 自動リカバリー中にエラーが発生しました:", recoveryErr);
+        }
+      }
+
+      return false;
+    };
+
+    const handleError = async () => {
       // If there is no active track or the source is empty/invalid, ignore the error
       if (!currentTrackRef.current || !audio.src || audio.src === window.location.href) {
         return;
@@ -321,7 +382,14 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
       if (!audio.error) {
         return;
       }
-      console.error("Audio error:", audio.error);
+      console.error("Audio error event detected:", audio.error);
+
+      // 1. Attempt automatic background recovery first without showing error screen!
+      const recovered = await recoverAudioPlayback();
+      if (recovered) {
+        return;
+      }
+
       const errCode = audio.error.code;
       let userFriendlyMsg = "音声の再生中にエラーが発生しました。";
       if (errCode === 1) userFriendlyMsg = "音声の読み込みが中断されました。";
@@ -421,10 +489,17 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
     let active = true;
 
     if (currentTrack) {
-      // Clear preloadedForTrackIdRef on track change so the new track can trigger its own preload
+      retryCountRef.current = 0; // Reset retry counter for new track
       preloadedForTrackIdRef.current = null;
 
       if (loadedTrackIdRef.current !== currentTrack.id) {
+        // Stop previous audio playback & clean up browser decoder pipeline before setting new src
+        try {
+          audioRef.current.pause();
+          audioRef.current.removeAttribute("src");
+          audioRef.current.load();
+        } catch (_) {}
+
         // If we already have a preloaded source for this track, apply it synchronously to preserve iOS audio thread
         if (preloadedTrackIdRef.current === currentTrack.id && preloadedUrlRef.current) {
           console.log(`Using preloaded source for track: ${currentTrack.title}`);
@@ -456,8 +531,15 @@ export default function Player({ tracks, onRefresh, currentTrack, onSelectTrack 
             if (silentAudioRef.current && silentAudioRef.current.paused) {
               silentAudioRef.current.play().catch((e) => console.warn("Silent audio play failed", e));
             }
-            audioRef.current.play().catch((err) => {
-              console.warn("Autoplay was blocked or failed", err);
+            audioRef.current.play().catch(async (err) => {
+              console.warn("Autoplay failed, attempting automatic recovery...", err);
+              if (objectUrlRef.current) {
+                try {
+                  audioRef.current?.pause();
+                  audioRef.current?.removeAttribute("src");
+                  audioRef.current?.load();
+                } catch (_) {}
+              }
               setIsPlaying(false);
             });
           }
