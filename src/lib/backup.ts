@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 import { Track } from "../types";
-import { saveTrack, getTracks } from "./db";
+import { saveTrack, getTracks, findDuplicateTrack } from "./db";
 import { detectMimeType } from "./audioHelper";
 
 export async function exportBackup(onProgress?: (percent: number) => void): Promise<Blob> {
@@ -50,6 +50,7 @@ export async function exportBackup(onProgress?: (percent: number) => void): Prom
 
 export interface RestoreResult {
   successCount: number;
+  skippedCount: number;
   totalCount: number;
 }
 
@@ -120,9 +121,24 @@ export async function importBackup(zipBlob: Blob): Promise<RestoreResult> {
   }
 
   let successCount = 0;
+  let skippedCount = 0;
+  const existingTracks = await getTracks();
 
   for (const item of metadataList) {
     if (!item.filename) continue;
+
+    // 重複楽曲チェック
+    const isDup = findDuplicateTrack({
+      id: item.id,
+      title: item.title,
+      artist: item.artist,
+      youtubeUrl: item.youtubeUrl,
+    }, existingTracks);
+
+    if (isDup) {
+      skippedCount++;
+      continue;
+    }
     
     // Robustly look up file by direct name or filename without directories
     let fileInZip = zip.file(item.filename);
@@ -147,12 +163,14 @@ export async function importBackup(zipBlob: Blob): Promise<RestoreResult> {
         blob: sanitizedBlob
       };
       await saveTrack(track);
+      existingTracks.push(track);
       successCount++;
     }
   }
 
   return {
     successCount,
+    skippedCount,
     totalCount: metadataList.length
   };
 }
@@ -160,6 +178,7 @@ export async function importBackup(zipBlob: Blob): Promise<RestoreResult> {
 // Dedicated function for importing/converting external backups with .bin files
 export interface ExternalImportResult {
   successCount: number;
+  skippedCount: number;
   totalCount: number;
   convertedZipBlob: Blob;
 }
@@ -197,6 +216,8 @@ export async function importExternalBackup(
   }
 
   let successCount = 0;
+  let skippedCount = 0;
+  const existingTracks = await getTracks();
   const convertedZip = new JSZip();
   const convertedMetadataList: any[] = [];
 
@@ -204,6 +225,24 @@ export async function importExternalBackup(
     const item = externalList[i];
     const itemFileName = item.fileName || item.filename || "";
     if (!itemFileName) continue;
+
+    const trackTitle = item.name || item.title || "名称未設定";
+    const trackArtist = item.artist || "Suno AI";
+    const trackId = item.id || `track_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 4)}`;
+
+    // 重複楽曲チェック
+    const isDup = findDuplicateTrack({
+      id: trackId,
+      title: trackTitle,
+      artist: trackArtist,
+      youtubeUrl: item.youtubeUrl || "",
+    }, existingTracks);
+
+    if (isDup) {
+      skippedCount++;
+      if (onProgress) onProgress(i + 1, externalList.length);
+      continue;
+    }
     
     // Find the file in zip (robustly, matching by basename)
     let fileInZip = zip.file(itemFileName);
@@ -218,10 +257,6 @@ export async function importExternalBackup(
         // Inspect the binary data to find its true audio mimetype (e.g., audio/aac, audio/mpeg)
         const detectedType = await detectMimeType(fileBlob);
         const sanitizedBlob = new Blob([fileBlob], { type: detectedType });
-
-        const trackId = item.id || `track_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 4)}`;
-        const trackTitle = item.name || item.title || "名称未設定";
-        const trackArtist = item.artist || "Suno AI";
         
         let trackGenre: "邦楽" | "洋楽" = "邦楽";
         const cat = (item.category || item.genre || "").toLowerCase();
@@ -242,6 +277,7 @@ export async function importExternalBackup(
           blob: sanitizedBlob
         };
         await saveTrack(track);
+        existingTracks.push(track);
 
         // 2. Add to the SoundBox-compliant ZIP structure (.mp3 filename)
         convertedZip.file(`${trackId}.mp3`, fileBlob);
@@ -276,6 +312,7 @@ export async function importExternalBackup(
 
   return {
     successCount,
+    skippedCount,
     totalCount: externalList.length,
     convertedZipBlob
   };
