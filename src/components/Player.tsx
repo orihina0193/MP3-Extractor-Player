@@ -1,5 +1,5 @@
-import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=17b4195c"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
-import __vite__cjsImport1_react from "/node_modules/.vite/deps/react.js?v=17b4195c"; const React = __vite__cjsImport1_react.__esModule ? __vite__cjsImport1_react.default : __vite__cjsImport1_react; const useState = __vite__cjsImport1_react["useState"]; const useEffect = __vite__cjsImport1_react["useEffect"]; const useRef = __vite__cjsImport1_react["useRef"];
+import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=1f31155a"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import __vite__cjsImport1_react from "/node_modules/.vite/deps/react.js?v=1f31155a"; const React = __vite__cjsImport1_react.__esModule ? __vite__cjsImport1_react.default : __vite__cjsImport1_react; const useState = __vite__cjsImport1_react["useState"]; const useEffect = __vite__cjsImport1_react["useEffect"]; const useRef = __vite__cjsImport1_react["useRef"];
 import {
   Play,
   Pause,
@@ -19,7 +19,7 @@ import {
   X,
   ChevronUp,
   UploadCloud
-} from "/node_modules/.vite/deps/lucide-react.js?v=17b4195c";
+} from "/node_modules/.vite/deps/lucide-react.js?v=1f31155a";
 import { deleteTrack, updateTrackMetadata } from "/src/lib/db.ts";
 import { detectMimeType, createSilentWavBlob } from "/src/lib/audioHelper.ts";
 import { getGitHubConfig, isGitHubConfigured, uploadTrackToGitHub } from "/src/lib/githubSync.ts";
