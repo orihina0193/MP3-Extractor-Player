@@ -24,10 +24,11 @@ import {
   fetchTracksFromGitHub,
   uploadTrackToGitHub,
   uploadSourceCodeToGitHub,
-  isGitHubConfigured
+  isGitHubConfigured,
+  getGitHubRemoteTrackIds
 } from "../lib/githubSync";
 
-import { getTracks, saveTrack } from "../lib/db";
+import { getTracks, saveTrack, findDuplicateTrack } from "../lib/db";
 import { Track, GitHubConfig } from "../types";
 
 interface GitHubSettingsProps {
@@ -156,15 +157,29 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         return;
       }
 
+      setSyncProgress("GitHub上の保存済み楽曲を確認中...");
+      const remoteTrackIds = await getGitHubRemoteTrackIds(config);
+      const remoteSet = new Set(remoteTrackIds);
+
+      // まだGitHubに同期されていない楽曲のみを抽出
+      const unSyncedTracks = localTracks.filter((t) => !remoteSet.has(t.id));
+
+      if (unSyncedTracks.length === 0) {
+        showMsg(`全てのローカル楽曲 (${localTracks.length}曲) は既にGitHubに同期・保管済みです。`, "info");
+        setSyncing(false);
+        setSyncProgress("");
+        return;
+      }
+
       let successCount = 0;
       let failCount = 0;
 
-      for (let i = 0; i < localTracks.length; i++) {
-        const track = localTracks[i];
-        setSyncProgress(`[${i + 1}/${localTracks.length}] 「${track.title}」をGitHubへアップロード中...`);
+      for (let i = 0; i < unSyncedTracks.length; i++) {
+        const track = unSyncedTracks[i];
+        setSyncProgress(`[${i + 1}/${unSyncedTracks.length}] 「${track.title}」をGitHubへアップロード中...`);
         try {
           await uploadTrackToGitHub(track, config, (stepMsg) => {
-            setSyncProgress(`[${i + 1}/${localTracks.length}] ${stepMsg}`);
+            setSyncProgress(`[${i + 1}/${unSyncedTracks.length}] ${stepMsg}`);
           });
           successCount++;
         } catch (err: any) {
@@ -173,11 +188,12 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         }
       }
 
+      const skippedCount = localTracks.length - unSyncedTracks.length;
       showMsg(
-        `一括同期完了: ${localTracks.length}曲中 ${successCount}曲をGitHubに正常保存しました！${
-          failCount > 0 ? ` (${failCount}曲エラー)` : ""
-        }`,
-        successCount > 0 ? "success" : "error"
+        `一括同期完了: 未保存の ${unSyncedTracks.length}曲中 ${successCount}曲をGitHubに保管しました！${
+          skippedCount > 0 ? ` (${skippedCount}曲は同期済みのためスキップ)` : ""
+        }${failCount > 0 ? ` (${failCount}曲エラー)` : ""}`,
+        successCount > 0 ? "success" : "info"
       );
       onRefresh();
     } catch (err: any) {
@@ -208,20 +224,44 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         return;
       }
 
-      setFetchProgress(`検出された${cloudTracks.length}曲のデータをダウンロード・キャッシュ構築中...`);
       const existingTracks = await getTracks();
+
+      // ローカルストレージに未保存の新規楽曲のみを事前に抽出
+      const newCloudTracks = cloudTracks.filter((item) => {
+        const meta = item.meta;
+        if (!meta || !meta.id) return false;
+
+        const isDup = findDuplicateTrack(
+          {
+            id: meta.id,
+            title: meta.title || "GitHub Audio",
+            artist: meta.artist,
+            youtubeUrl: meta.youtubeUrl,
+          },
+          existingTracks
+        );
+        return !isDup;
+      });
+
+      const skippedCount = cloudTracks.length - newCloudTracks.length;
+
+      if (newCloudTracks.length === 0) {
+        showMsg(
+          `全${cloudTracks.length}曲のデータは既にローカルストレージに保存されています。（新規追加 0曲）`,
+          "info"
+        );
+        setFetching(false);
+        setFetchProgress("");
+        return;
+      }
+
       let importedCount = 0;
 
-      for (let i = 0; i < cloudTracks.length; i++) {
-        const item = cloudTracks[i];
+      for (let i = 0; i < newCloudTracks.length; i++) {
+        const item = newCloudTracks[i];
         const meta = item.meta;
-        if (!meta || !meta.id) continue;
 
-        // Skip if already in local DB
-        const exists = existingTracks.some((t) => t.id === meta.id);
-        if (exists) continue;
-
-        setFetchProgress(`[${i + 1}/${cloudTracks.length}] 「${meta.title || meta.id}」の音声を取得中...`);
+        setFetchProgress(`[${i + 1}/${newCloudTracks.length}] 「${meta.title || meta.id}」の音声を取得中...`);
 
         if (item.audioBlobUrl) {
           try {
@@ -239,6 +279,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
                 githubUrl: item.audioBlobUrl,
               };
               await saveTrack(newTrack);
+              existingTracks.push(newTrack);
               importedCount++;
             }
           } catch (dlErr) {
@@ -248,7 +289,9 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       }
 
       showMsg(
-        `クラウドからの復元・取り込み完了: GitHubから ${importedCount}曲を新たにローカルキャッシュへ登録しました！`,
+        `クラウドからの取り込み完了: 未保存の ${newCloudTracks.length}曲中 ${importedCount}曲を新たにローカルへ保存しました！${
+          skippedCount > 0 ? ` (${skippedCount}曲は保存済みのためスキップ)` : ""
+        }`,
         "success"
       );
       onRefresh();
