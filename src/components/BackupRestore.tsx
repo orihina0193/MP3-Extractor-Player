@@ -1,8 +1,7 @@
 import React, { useState, useRef } from "react";
 import { Download, Upload, Trash2, AlertTriangle, Loader2, RefreshCw, FileAudio } from "lucide-react";
 import { exportBackup, importBackup, importExternalBackup } from "../lib/backup";
-import { clearAllTracks, getTracks } from "../lib/db";
-import { getGitHubConfig, isGitHubConfigured, uploadTrackToGitHub, getGitHubRemoteTrackIds } from "../lib/githubSync";
+import { clearAllTracks } from "../lib/db";
 
 interface BackupRestoreProps {
   onRefresh: () => void;
@@ -72,27 +71,6 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
     }
   };
 
-  const triggerAutoSyncUnsavedTracks = async () => {
-    const ghConfig = getGitHubConfig();
-    if (!ghConfig.autoSync || !isGitHubConfigured(ghConfig)) return;
-
-    try {
-      const localTracks = await getTracks();
-      const remoteIds = await getGitHubRemoteTrackIds(ghConfig);
-      const unsaved = localTracks.filter((t) => !remoteIds.has(t.id));
-
-      if (unsaved.length > 0) {
-        showMsg(`ZIPから復元された未保存の${unsaved.length}曲をバックグラウンドでGitHubに同期中...`, "info");
-        for (const track of unsaved) {
-          try {
-            await uploadTrackToGitHub(track, ghConfig);
-          } catch (_) {}
-        }
-        showMsg("ZIP復元楽曲のGitHub自動同期が完了しました！", "success");
-      }
-    } catch (_) {}
-  };
-
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -102,7 +80,6 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
       const result = await importBackup(file);
       showMsg(`復元完了: ${result.totalCount}個中 ${result.successCount}個のトラックを復元しました！`, "success");
       onRefresh();
-      triggerAutoSyncUnsavedTracks();
     } catch (err: any) {
       console.error(err);
       showMsg("復元に失敗しました。ZIPファイルが正しいバックアップであることを確認してください。" + err.message, "error");
@@ -131,7 +108,6 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
         "success"
       );
       onRefresh();
-      triggerAutoSyncUnsavedTracks();
     } catch (err: any) {
       console.error(err);
       showMsg("他アプリZIPの変換に失敗しました: " + err.message, "error");
