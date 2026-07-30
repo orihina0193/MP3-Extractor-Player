@@ -375,6 +375,20 @@ export async function fetchTracksFromGitHub(
 }
 
 /**
+ Get list of track IDs existing in remote GitHub repository
+ */
+export async function getGitHubRemoteTrackIds(config: GitHubConfig): Promise<string[]> {
+  if (!isGitHubConfigured(config)) return [];
+  try {
+    const tracks = await fetchTracksFromGitHub(config);
+    return tracks.map((t) => String(t.meta?.id)).filter(Boolean);
+  } catch (e) {
+    console.warn("Failed to fetch remote track IDs:", e);
+    return [];
+  }
+}
+
+/**
  Delete a track from GitHub repository (.m4a, .json, and update index)
  */
 export async function deleteTrackFromGitHub(
