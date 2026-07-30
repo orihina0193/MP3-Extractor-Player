@@ -4,6 +4,54 @@ const DB_NAME = "M4AExtractorPlayerDB";
 const STORE_NAME = "tracks";
 const DB_VERSION = 1;
 
+/**
+ * 既存のトラックリストから重複する楽曲を検索する
+ */
+export function findDuplicateTrack(
+  target: { id?: string; title: string; artist?: string; youtubeUrl?: string },
+  existingTracks: Track[]
+): Track | undefined {
+  const normTitle = target.title.trim().toLowerCase();
+  const normArtist = (target.artist || "").trim().toLowerCase();
+
+  const getYTId = (url?: string) => {
+    if (!url) return null;
+    const match = url.match(/(?:v=|shorts\/|live\/|embed\/|v\/|youtu\.be\/)([^"&?\/\s]{11})/);
+    return match ? match[1] : null;
+  };
+
+  const newYtId = getYTId(target.youtubeUrl);
+
+  return existingTracks.find((existing) => {
+    // 1. IDが完全一致
+    if (target.id && existing.id === target.id) {
+      return true;
+    }
+
+    // 2. YouTube Video ID が一致
+    if (newYtId && existing.youtubeUrl) {
+      const existingYtId = getYTId(existing.youtubeUrl);
+      if (existingYtId && existingYtId === newYtId) {
+        return true;
+      }
+    }
+
+    // 3. Title と Artist が一致
+    const existingTitle = existing.title.trim().toLowerCase();
+    const existingArtist = (existing.artist || "").trim().toLowerCase();
+
+    if (normTitle && normTitle === existingTitle) {
+      if (normArtist && existingArtist) {
+        if (normArtist === existingArtist) return true;
+      } else {
+        return true;
+      }
+    }
+
+    return false;
+  });
+}
+
 export function initDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
