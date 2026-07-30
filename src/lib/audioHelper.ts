@@ -1,132 +1,69 @@
-/**
- * Detects the correct audio MIME type of a Blob by inspecting its magic numbers/file signature.
- * This ensures broad compatibility on platforms like iOS/macOS Safari and Chrome,
- * avoiding "Error Code 3" decode failures when a conversion service returns a different format than M4A.
- */
-export async function detectMimeType(blob: Blob): Promise<string> {
+export async function detectMimeType(blob) {
   try {
     const headerSlice = blob.slice(0, 16);
     const arrayBuffer = await headerSlice.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
-
     if (bytes.length < 4) {
       return blob.type || "audio/mp4";
     }
-
-    // 1. MP3 (with ID3v2 tag: "ID3" (0x49, 0x44, 0x33))
-    if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    if (bytes[0] === 73 && bytes[1] === 68 && bytes[2] === 51) {
       return "audio/mpeg";
     }
-    // MP3 (raw frame with sync word: 11 bits set (0xFFE0 or greater))
-    if (bytes[0] === 0xFF && (bytes[1] & 0xE0) === 0xE0) {
+    if (bytes[0] === 255 && (bytes[1] & 224) === 224) {
       return "audio/mpeg";
     }
-
-    // 2. MP4 / M4A (contains "ftyp" (0x66, 0x74, 0x79, 0x70) at offset 4)
-    if (
-      bytes.length >= 8 &&
-      bytes[4] === 0x66 &&
-      bytes[5] === 0x74 &&
-      bytes[6] === 0x79 &&
-      bytes[7] === 0x70
-    ) {
+    if (bytes.length >= 8 && bytes[4] === 102 && bytes[5] === 116 && bytes[6] === 121 && bytes[7] === 112) {
       return "audio/mp4";
     }
-
-    // 3. WebM / MKV / EBML container (starts with EBML ID: 0x1A 0x45 0xDF 0xA3)
-    if (bytes[0] === 0x1A && bytes[1] === 0x45 && bytes[2] === 0xDF && bytes[3] === 0xA3) {
+    if (bytes[0] === 26 && bytes[1] === 69 && bytes[2] === 223 && bytes[3] === 163) {
       return "audio/webm";
     }
-
-    // 4. Ogg container (starts with "OggS" (0x4F, 0x67, 0x67, 0x53))
-    if (bytes[0] === 0x4F && bytes[1] === 0x67 && bytes[2] === 0x67 && bytes[3] === 0x53) {
+    if (bytes[0] === 79 && bytes[1] === 103 && bytes[2] === 103 && bytes[3] === 83) {
       return "audio/ogg";
     }
-
-    // 5. FLAC (starts with "fLaC" (0x66, 0x4C, 0x61, 0x43))
-    if (bytes[0] === 0x66 && bytes[1] === 0x4C && bytes[2] === 0x61 && bytes[3] === 0x43) {
+    if (bytes[0] === 102 && bytes[1] === 76 && bytes[2] === 97 && bytes[3] === 67) {
       return "audio/flac";
     }
-
-    // 6. WAV (RIFF 0x52 0x49 0x46 0x46 followed by WAVE 0x57 0x41 0x56 0x45 at offset 8)
-    if (
-      bytes.length >= 12 &&
-      bytes[0] === 0x52 &&
-      bytes[1] === 0x49 &&
-      bytes[2] === 0x46 &&
-      bytes[3] === 0x46 &&
-      bytes[8] === 0x57 &&
-      bytes[9] === 0x41 &&
-      bytes[10] === 0x56 &&
-      bytes[11] === 0x45
-    ) {
+    if (bytes.length >= 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 65 && bytes[10] === 86 && bytes[11] === 69) {
       return "audio/wav";
     }
-
-    // 7. AAC (ADTS frames: starts with 0xFFF (0xFF, and first 4 bits of next byte are 1111))
-    if (bytes[0] === 0xFF && (bytes[1] & 0xF0) === 0xF0) {
+    if (bytes[0] === 255 && (bytes[1] & 240) === 240) {
       return "audio/aac";
     }
   } catch (error) {
     console.error("Error inspecting file signature for MIME type detection:", error);
   }
-
-  // Fallback to the original Blob's type if it exists, otherwise default to audio/mp4
   return blob.type || "audio/mp4";
 }
-
-/**
- * Dynamically generates a silent PCM WAV Blob of specified duration.
- * This is used for background audio session keeping on iOS/Safari,
- * avoiding extremely short base64 files which loop thousands of times per second and abuse CPU/battery,
- * which triggers iOS background process suspension.
- */
-export function createSilentWavBlob(durationSeconds: number = 10, sampleRate: number = 8000): Blob {
+export function createSilentWavBlob(durationSeconds = 10, sampleRate = 8e3) {
   const numChannels = 1;
   const bitsPerSample = 16;
-  const blockAlign = (numChannels * bitsPerSample) / 8; // 2 bytes
-  const byteRate = sampleRate * blockAlign; // 16000 bytes/sec
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const byteRate = sampleRate * blockAlign;
   const numSamples = sampleRate * durationSeconds;
   const dataSize = numSamples * blockAlign;
   const chunkSize = 36 + dataSize;
-
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
-
-  // Helper to write string bytes
-  const writeString = (v: DataView, offset: number, string: string) => {
+  const writeString = (v, offset, string) => {
     for (let i = 0; i < string.length; i++) {
       v.setUint8(offset + i, string.charCodeAt(i));
     }
   };
-
-  /* RIFF identifier */
-  writeString(view, 0, 'RIFF');
-  /* file length */
+  writeString(view, 0, "RIFF");
   view.setUint32(4, chunkSize, true);
-  /* RIFF type */
-  writeString(view, 8, 'WAVE');
-  /* format chunk identifier */
-  writeString(view, 12, 'fmt ');
-  /* format chunk length */
+  writeString(view, 8, "WAVE");
+  writeString(view, 12, "fmt ");
   view.setUint32(16, 16, true);
-  /* sample format (PCM) */
   view.setUint16(20, 1, true);
-  /* channel count */
   view.setUint16(22, numChannels, true);
-  /* sample rate */
   view.setUint32(24, sampleRate, true);
-  /* byte rate */
   view.setUint32(28, byteRate, true);
-  /* block align */
   view.setUint16(32, blockAlign, true);
-  /* bits per sample */
   view.setUint16(34, bitsPerSample, true);
-  /* data chunk identifier */
-  writeString(view, 36, 'data');
-  /* data chunk length */
+  writeString(view, 36, "data");
   view.setUint32(40, dataSize, true);
-
-  // Remaining bytes are initialized to 0 (perfect PCM signed 16-bit silence!)
-  return new Blob([buffer], { type: 'audio/wav' });
+  return new Blob([buffer], { type: "audio/wav" });
 }
+
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbImF1ZGlvSGVscGVyLnRzIl0sInNvdXJjZXNDb250ZW50IjpbIi8qKlxuICogRGV0ZWN0cyB0aGUgY29ycmVjdCBhdWRpbyBNSU1FIHR5cGUgb2YgYSBCbG9iIGJ5IGluc3BlY3RpbmcgaXRzIG1hZ2ljIG51bWJlcnMvZmlsZSBzaWduYXR1cmUuXG4gKiBUaGlzIGVuc3VyZXMgYnJvYWQgY29tcGF0aWJpbGl0eSBvbiBwbGF0Zm9ybXMgbGlrZSBpT1MvbWFjT1MgU2FmYXJpIGFuZCBDaHJvbWUsXG4gKiBhdm9pZGluZyBcIkVycm9yIENvZGUgM1wiIGRlY29kZSBmYWlsdXJlcyB3aGVuIGEgY29udmVyc2lvbiBzZXJ2aWNlIHJldHVybnMgYSBkaWZmZXJlbnQgZm9ybWF0IHRoYW4gTTRBLlxuICovXG5leHBvcnQgYXN5bmMgZnVuY3Rpb24gZGV0ZWN0TWltZVR5cGUoYmxvYjogQmxvYik6IFByb21pc2U8c3RyaW5nPiB7XG4gIHRyeSB7XG4gICAgY29uc3QgaGVhZGVyU2xpY2UgPSBibG9iLnNsaWNlKDAsIDE2KTtcbiAgICBjb25zdCBhcnJheUJ1ZmZlciA9IGF3YWl0IGhlYWRlclNsaWNlLmFycmF5QnVmZmVyKCk7XG4gICAgY29uc3QgYnl0ZXMgPSBuZXcgVWludDhBcnJheShhcnJheUJ1ZmZlcik7XG5cbiAgICBpZiAoYnl0ZXMubGVuZ3RoIDwgNCkge1xuICAgICAgcmV0dXJuIGJsb2IudHlwZSB8fCBcImF1ZGlvL21wNFwiO1xuICAgIH1cblxuICAgIC8vIDEuIE1QMyAod2l0aCBJRDN2MiB0YWc6IFwiSUQzXCIgKDB4NDksIDB4NDQsIDB4MzMpKVxuICAgIGlmIChieXRlc1swXSA9PT0gMHg0OSAmJiBieXRlc1sxXSA9PT0gMHg0NCAmJiBieXRlc1syXSA9PT0gMHgzMykge1xuICAgICAgcmV0dXJuIFwiYXVkaW8vbXBlZ1wiO1xuICAgIH1cbiAgICAvLyBNUDMgKHJhdyBmcmFtZSB3aXRoIHN5bmMgd29yZDogMTEgYml0cyBzZXQgKDB4RkZFMCBvciBncmVhdGVyKSlcbiAgICBpZiAoYnl0ZXNbMF0gPT09IDB4RkYgJiYgKGJ5dGVzWzFdICYgMHhFMCkgPT09IDB4RTApIHtcbiAgICAgIHJldHVybiBcImF1ZGlvL21wZWdcIjtcbiAgICB9XG5cbiAgICAvLyAyLiBNUDQgLyBNNEEgKGNvbnRhaW5zIFwiZnR5cFwiICgweDY2LCAweDc0LCAweDc5LCAweDcwKSBhdCBvZmZzZXQgNClcbiAgICBpZiAoXG4gICAgICBieXRlcy5sZW5ndGggPj0gOCAmJlxuICAgICAgYnl0ZXNbNF0gPT09IDB4NjYgJiZcbiAgICAgIGJ5dGVzWzVdID09PSAweDc0ICYmXG4gICAgICBieXRlc1s2XSA9PT0gMHg3OSAmJlxuICAgICAgYnl0ZXNbN10gPT09IDB4NzBcbiAgICApIHtcbiAgICAgIHJldHVybiBcImF1ZGlvL21wNFwiO1xuICAgIH1cblxuICAgIC8vIDMuIFdlYk0gLyBNS1YgLyBFQk1MIGNvbnRhaW5lciAoc3RhcnRzIHdpdGggRUJNTCBJRDogMHgxQSAweDQ1IDB4REYgMHhBMylcbiAgICBpZiAoYnl0ZXNbMF0gPT09IDB4MUEgJiYgYnl0ZXNbMV0gPT09IDB4NDUgJiYgYnl0ZXNbMl0gPT09IDB4REYgJiYgYnl0ZXNbM10gPT09IDB4QTMpIHtcbiAgICAgIHJldHVybiBcImF1ZGlvL3dlYm1cIjtcbiAgICB9XG5cbiAgICAvLyA0LiBPZ2cgY29udGFpbmVyIChzdGFydHMgd2l0aCBcIk9nZ1NcIiAoMHg0RiwgMHg2NywgMHg2NywgMHg1MykpXG4gICAgaWYgKGJ5dGVzWzBdID09PSAweDRGICYmIGJ5dGVzWzFdID09PSAweDY3ICYmIGJ5dGVzWzJdID09PSAweDY3ICYmIGJ5dGVzWzNdID09PSAweDUzKSB7XG4gICAgICByZXR1cm4gXCJhdWRpby9vZ2dcIjtcbiAgICB9XG5cbiAgICAvLyA1LiBGTEFDIChzdGFydHMgd2l0aCBcImZMYUNcIiAoMHg2NiwgMHg0QywgMHg2MSwgMHg0MykpXG4gICAgaWYgKGJ5dGVzWzBdID09PSAweDY2ICYmIGJ5dGVzWzFdID09PSAweDRDICYmIGJ5dGVzWzJdID09PSAweDYxICYmIGJ5dGVzWzNdID09PSAweDQzKSB7XG4gICAgICByZXR1cm4gXCJhdWRpby9mbGFjXCI7XG4gICAgfVxuXG4gICAgLy8gNi4gV0FWIChSSUZGIDB4NTIgMHg0OSAweDQ2IDB4NDYgZm9sbG93ZWQgYnkgV0FWRSAweDU3IDB4NDEgMHg1NiAweDQ1IGF0IG9mZnNldCA4KVxuICAgIGlmIChcbiAgICAgIGJ5dGVzLmxlbmd0aCA+PSAxMiAmJlxuICAgICAgYnl0ZXNbMF0gPT09IDB4NTIgJiZcbiAgICAgIGJ5dGVzWzFdID09PSAweDQ5ICYmXG4gICAgICBieXRlc1syXSA9PT0gMHg0NiAmJlxuICAgICAgYnl0ZXNbM10gPT09IDB4NDYgJiZcbiAgICAgIGJ5dGVzWzhdID09PSAweDU3ICYmXG4gICAgICBieXRlc1s5XSA9PT0gMHg0MSAmJlxuICAgICAgYnl0ZXNbMTBdID09PSAweDU2ICYmXG4gICAgICBieXRlc1sxMV0gPT09IDB4NDVcbiAgICApIHtcbiAgICAgIHJldHVybiBcImF1ZGlvL3dhdlwiO1xuICAgIH1cblxuICAgIC8vIDcuIEFBQyAoQURUUyBmcmFtZXM6IHN0YXJ0cyB3aXRoIDB4RkZGICgweEZGLCBhbmQgZmlyc3QgNCBiaXRzIG9mIG5leHQgYnl0ZSBhcmUgMTExMSkpXG4gICAgaWYgKGJ5dGVzWzBdID09PSAweEZGICYmIChieXRlc1sxXSAmIDB4RjApID09PSAweEYwKSB7XG4gICAgICByZXR1cm4gXCJhdWRpby9hYWNcIjtcbiAgICB9XG4gIH0gY2F0Y2ggKGVycm9yKSB7XG4gICAgY29uc29sZS5lcnJvcihcIkVycm9yIGluc3BlY3RpbmcgZmlsZSBzaWduYXR1cmUgZm9yIE1JTUUgdHlwZSBkZXRlY3Rpb246XCIsIGVycm9yKTtcbiAgfVxuXG4gIC8vIEZhbGxiYWNrIHRvIHRoZSBvcmlnaW5hbCBCbG9iJ3MgdHlwZSBpZiBpdCBleGlzdHMsIG90aGVyd2lzZSBkZWZhdWx0IHRvIGF1ZGlvL21wNFxuICByZXR1cm4gYmxvYi50eXBlIHx8IFwiYXVkaW8vbXA0XCI7XG59XG5cbi8qKlxuICogRHluYW1pY2FsbHkgZ2VuZXJhdGVzIGEgc2lsZW50IFBDTSBXQVYgQmxvYiBvZiBzcGVjaWZpZWQgZHVyYXRpb24uXG4gKiBUaGlzIGlzIHVzZWQgZm9yIGJhY2tncm91bmQgYXVkaW8gc2Vzc2lvbiBrZWVwaW5nIG9uIGlPUy9TYWZhcmksXG4gKiBhdm9pZGluZyBleHRyZW1lbHkgc2hvcnQgYmFzZTY0IGZpbGVzIHdoaWNoIGxvb3AgdGhvdXNhbmRzIG9mIHRpbWVzIHBlciBzZWNvbmQgYW5kIGFidXNlIENQVS9iYXR0ZXJ5LFxuICogd2hpY2ggdHJpZ2dlcnMgaU9TIGJhY2tncm91bmQgcHJvY2VzcyBzdXNwZW5zaW9uLlxuICovXG5leHBvcnQgZnVuY3Rpb24gY3JlYXRlU2lsZW50V2F2QmxvYihkdXJhdGlvblNlY29uZHM6IG51bWJlciA9IDEwLCBzYW1wbGVSYXRlOiBudW1iZXIgPSA4MDAwKTogQmxvYiB7XG4gIGNvbnN0IG51bUNoYW5uZWxzID0gMTtcbiAgY29uc3QgYml0c1BlclNhbXBsZSA9IDE2O1xuICBjb25zdCBibG9ja0FsaWduID0gKG51bUNoYW5uZWxzICogYml0c1BlclNhbXBsZSkgLyA4OyAvLyAyIGJ5dGVzXG4gIGNvbnN0IGJ5dGVSYXRlID0gc2FtcGxlUmF0ZSAqIGJsb2NrQWxpZ247IC8vIDE2MDAwIGJ5dGVzL3NlY1xuICBjb25zdCBudW1TYW1wbGVzID0gc2FtcGxlUmF0ZSAqIGR1cmF0aW9uU2Vjb25kcztcbiAgY29uc3QgZGF0YVNpemUgPSBudW1TYW1wbGVzICogYmxvY2tBbGlnbjtcbiAgY29uc3QgY2h1bmtTaXplID0gMzYgKyBkYXRhU2l6ZTtcblxuICBjb25zdCBidWZmZXIgPSBuZXcgQXJyYXlCdWZmZXIoNDQgKyBkYXRhU2l6ZSk7XG4gIGNvbnN0IHZpZXcgPSBuZXcgRGF0YVZpZXcoYnVmZmVyKTtcblxuICAvLyBIZWxwZXIgdG8gd3JpdGUgc3RyaW5nIGJ5dGVzXG4gIGNvbnN0IHdyaXRlU3RyaW5nID0gKHY6IERhdGFWaWV3LCBvZmZzZXQ6IG51bWJlciwgc3RyaW5nOiBzdHJpbmcpID0+IHtcbiAgICBmb3IgKGxldCBpID0gMDsgaSA8IHN0cmluZy5sZW5ndGg7IGkrKykge1xuICAgICAgdi5zZXRVaW50OChvZmZzZXQgKyBpLCBzdHJpbmcuY2hhckNvZGVBdChpKSk7XG4gICAgfVxuICB9O1xuXG4gIC8qIFJJRkYgaWRlbnRpZmllciAqL1xuICB3cml0ZVN0cmluZyh2aWV3LCAwLCAnUklGRicpO1xuICAvKiBmaWxlIGxlbmd0aCAqL1xuICB2aWV3LnNldFVpbnQzMig0LCBjaHVua1NpemUsIHRydWUpO1xuICAvKiBSSUZGIHR5cGUgKi9cbiAgd3JpdGVTdHJpbmcodmlldywgOCwgJ1dBVkUnKTtcbiAgLyogZm9ybWF0IGNodW5rIGlkZW50aWZpZXIgKi9cbiAgd3JpdGVTdHJpbmcodmlldywgMTIsICdmbXQgJyk7XG4gIC8qIGZvcm1hdCBjaHVuayBsZW5ndGggKi9cbiAgdmlldy5zZXRVaW50MzIoMTYsIDE2LCB0cnVlKTtcbiAgLyogc2FtcGxlIGZvcm1hdCAoUENNKSAqL1xuICB2aWV3LnNldFVpbnQxNigyMCwgMSwgdHJ1ZSk7XG4gIC8qIGNoYW5uZWwgY291bnQgKi9cbiAgdmlldy5zZXRVaW50MTYoMjIsIG51bUNoYW5uZWxzLCB0cnVlKTtcbiAgLyogc2FtcGxlIHJhdGUgKi9cbiAgdmlldy5zZXRVaW50MzIoMjQsIHNhbXBsZVJhdGUsIHRydWUpO1xuICAvKiBieXRlIHJhdGUgKi9cbiAgdmlldy5zZXRVaW50MzIoMjgsIGJ5dGVSYXRlLCB0cnVlKTtcbiAgLyogYmxvY2sgYWxpZ24gKi9cbiAgdmlldy5zZXRVaW50MTYoMzIsIGJsb2NrQWxpZ24sIHRydWUpO1xuICAvKiBiaXRzIHBlciBzYW1wbGUgKi9cbiAgdmlldy5zZXRVaW50MTYoMzQsIGJpdHNQZXJTYW1wbGUsIHRydWUpO1xuICAvKiBkYXRhIGNodW5rIGlkZW50aWZpZXIgKi9cbiAgd3JpdGVTdHJpbmcodmlldywgMzYsICdkYXRhJyk7XG4gIC8qIGRhdGEgY2h1bmsgbGVuZ3RoICovXG4gIHZpZXcuc2V0VWludDMyKDQwLCBkYXRhU2l6ZSwgdHJ1ZSk7XG5cbiAgLy8gUmVtYWluaW5nIGJ5dGVzIGFyZSBpbml0aWFsaXplZCB0byAwIChwZXJmZWN0IFBDTSBzaWduZWQgMTYtYml0IHNpbGVuY2UhKVxuICByZXR1cm4gbmV3IEJsb2IoW2J1ZmZlcl0sIHsgdHlwZTogJ2F1ZGlvL3dhdicgfSk7XG59XG4iXSwibWFwcGluZ3MiOiJBQUtBLHNCQUFzQixlQUFlLE1BQTZCO0FBQ2hFLE1BQUk7QUFDRixVQUFNLGNBQWMsS0FBSyxNQUFNLEdBQUcsRUFBRTtBQUNwQyxVQUFNLGNBQWMsTUFBTSxZQUFZLFlBQVk7QUFDbEQsVUFBTSxRQUFRLElBQUksV0FBVyxXQUFXO0FBRXhDLFFBQUksTUFBTSxTQUFTLEdBQUc7QUFDcEIsYUFBTyxLQUFLLFFBQVE7QUFBQSxJQUN0QjtBQUdBLFFBQUksTUFBTSxDQUFDLE1BQU0sTUFBUSxNQUFNLENBQUMsTUFBTSxNQUFRLE1BQU0sQ0FBQyxNQUFNLElBQU07QUFDL0QsYUFBTztBQUFBLElBQ1Q7QUFFQSxRQUFJLE1BQU0sQ0FBQyxNQUFNLFFBQVMsTUFBTSxDQUFDLElBQUksU0FBVSxLQUFNO0FBQ25ELGFBQU87QUFBQSxJQUNUO0FBR0EsUUFDRSxNQUFNLFVBQVUsS0FDaEIsTUFBTSxDQUFDLE1BQU0sT0FDYixNQUFNLENBQUMsTUFBTSxPQUNiLE1BQU0sQ0FBQyxNQUFNLE9BQ2IsTUFBTSxDQUFDLE1BQU0sS0FDYjtBQUNBLGFBQU87QUFBQSxJQUNUO0FBR0EsUUFBSSxNQUFNLENBQUMsTUFBTSxNQUFRLE1BQU0sQ0FBQyxNQUFNLE1BQVEsTUFBTSxDQUFDLE1BQU0sT0FBUSxNQUFNLENBQUMsTUFBTSxLQUFNO0FBQ3BGLGFBQU87QUFBQSxJQUNUO0FBR0EsUUFBSSxNQUFNLENBQUMsTUFBTSxNQUFRLE1BQU0sQ0FBQyxNQUFNLE9BQVEsTUFBTSxDQUFDLE1BQU0sT0FBUSxNQUFNLENBQUMsTUFBTSxJQUFNO0FBQ3BGLGFBQU87QUFBQSxJQUNUO0FBR0EsUUFBSSxNQUFNLENBQUMsTUFBTSxPQUFRLE1BQU0sQ0FBQyxNQUFNLE1BQVEsTUFBTSxDQUFDLE1BQU0sTUFBUSxNQUFNLENBQUMsTUFBTSxJQUFNO0FBQ3BGLGFBQU87QUFBQSxJQUNUO0FBR0EsUUFDRSxNQUFNLFVBQVUsTUFDaEIsTUFBTSxDQUFDLE1BQU0sTUFDYixNQUFNLENBQUMsTUFBTSxNQUNiLE1BQU0sQ0FBQyxNQUFNLE1BQ2IsTUFBTSxDQUFDLE1BQU0sTUFDYixNQUFNLENBQUMsTUFBTSxNQUNiLE1BQU0sQ0FBQyxNQUFNLE1BQ2IsTUFBTSxFQUFFLE1BQU0sTUFDZCxNQUFNLEVBQUUsTUFBTSxJQUNkO0FBQ0EsYUFBTztBQUFBLElBQ1Q7QUFHQSxRQUFJLE1BQU0sQ0FBQyxNQUFNLFFBQVMsTUFBTSxDQUFDLElBQUksU0FBVSxLQUFNO0FBQ25ELGFBQU87QUFBQSxJQUNUO0FBQUEsRUFDRixTQUFTLE9BQU87QUFDZCxZQUFRLE1BQU0sNERBQTRELEtBQUs7QUFBQSxFQUNqRjtBQUdBLFNBQU8sS0FBSyxRQUFRO0FBQ3RCO0FBUU8sZ0JBQVMsb0JBQW9CLGtCQUEwQixJQUFJLGFBQXFCLEtBQVk7QUFDakcsUUFBTSxjQUFjO0FBQ3BCLFFBQU0sZ0JBQWdCO0FBQ3RCLFFBQU0sYUFBYyxjQUFjLGdCQUFpQjtBQUNuRCxRQUFNLFdBQVcsYUFBYTtBQUM5QixRQUFNLGFBQWEsYUFBYTtBQUNoQyxRQUFNLFdBQVcsYUFBYTtBQUM5QixRQUFNLFlBQVksS0FBSztBQUV2QixRQUFNLFNBQVMsSUFBSSxZQUFZLEtBQUssUUFBUTtBQUM1QyxRQUFNLE9BQU8sSUFBSSxTQUFTLE1BQU07QUFHaEMsUUFBTSxjQUFjLENBQUMsR0FBYSxRQUFnQixXQUFtQjtBQUNuRSxhQUFTLElBQUksR0FBRyxJQUFJLE9BQU8sUUFBUSxLQUFLO0FBQ3RDLFFBQUUsU0FBUyxTQUFTLEdBQUcsT0FBTyxXQUFXLENBQUMsQ0FBQztBQUFBLElBQzdDO0FBQUEsRUFDRjtBQUdBLGNBQVksTUFBTSxHQUFHLE1BQU07QUFFM0IsT0FBSyxVQUFVLEdBQUcsV0FBVyxJQUFJO0FBRWpDLGNBQVksTUFBTSxHQUFHLE1BQU07QUFFM0IsY0FBWSxNQUFNLElBQUksTUFBTTtBQUU1QixPQUFLLFVBQVUsSUFBSSxJQUFJLElBQUk7QUFFM0IsT0FBSyxVQUFVLElBQUksR0FBRyxJQUFJO0FBRTFCLE9BQUssVUFBVSxJQUFJLGFBQWEsSUFBSTtBQUVwQyxPQUFLLFVBQVUsSUFBSSxZQUFZLElBQUk7QUFFbkMsT0FBSyxVQUFVLElBQUksVUFBVSxJQUFJO0FBRWpDLE9BQUssVUFBVSxJQUFJLFlBQVksSUFBSTtBQUVuQyxPQUFLLFVBQVUsSUFBSSxlQUFlLElBQUk7QUFFdEMsY0FBWSxNQUFNLElBQUksTUFBTTtBQUU1QixPQUFLLFVBQVUsSUFBSSxVQUFVLElBQUk7QUFHakMsU0FBTyxJQUFJLEtBQUssQ0FBQyxNQUFNLEdBQUcsRUFBRSxNQUFNLFlBQVksQ0FBQztBQUNqRDsiLCJuYW1lcyI6W119
