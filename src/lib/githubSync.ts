@@ -415,30 +415,12 @@ export async function fetchTracksFromGitHub(
   const candidateFolders = Array.from(new Set([primaryFolder, "audio", "tracks"]));
 
   for (const folder of candidateFolders) {
-    const indexFilePath = `${folder}/tracks.json`;
+    const trackMap = new Map<string, { meta: any; audioFilePath?: string; audioBlobUrl?: string }>();
 
-    onProgress?.(`GitHubリポジトリ (${folder}/) からインデックスを取得中...`);
+    onProgress?.(`GitHubツリー構造をスキャン中 (${folder}/)...`);
 
-    // 1. Try reading master tracks.json using fetchGitHubFileText (supports >1MB files)
+    // 1. Git Trees API scan (retrieves ALL files recursively in 1 API call without directory pagination limits)
     try {
-      const indexText = await fetchGitHubFileText(config, indexFilePath);
-      if (indexText && indexText.trim()) {
-        const trackList = JSON.parse(indexText) as any[];
-        if (Array.isArray(trackList) && trackList.length > 0) {
-          return trackList.map((meta) => ({
-            meta,
-            audioFilePath: `${folder}/${meta.id}.m4a`,
-            audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
-          }));
-        }
-      }
-    } catch (e) {
-      console.warn(`tracks.json read/parse failed in ${folder}/, switching to Git Trees API scan...`, e);
-    }
-
-    // 2. Git Trees API scan fallback (retrieves full file list in 1 API call without directory truncation)
-    try {
-      onProgress?.(`GitHubツリー構造を取得中 (${folder}/)...`);
       const treeRes = await fetch(
         `https://api.github.com/repos/${config.owner}/${config.repo}/git/trees/${config.branch || "main"}?recursive=1`,
         {
@@ -465,16 +447,18 @@ export async function fetchTracksFromGitHub(
           .map((item) => item.path);
 
         if (targetJsonPaths.length > 0) {
-          const results: Array<{ meta: any; audioFilePath?: string; audioBlobUrl?: string }> = [];
+          onProgress?.(`GitHub上で ${targetJsonPaths.length}件の個別楽曲定義ファイル (.json) を検出！読み込み中...`);
 
           for (let i = 0; i < targetJsonPaths.length; i++) {
             const jsonPath = targetJsonPaths[i];
-            onProgress?.(`[${i + 1}/${targetJsonPaths.length}] 楽曲メタデータを取得中...`);
+            if (i % 10 === 0 || i === targetJsonPaths.length - 1) {
+              onProgress?.(`[${i + 1}/${targetJsonPaths.length}] メタデータ取得中...`);
+            }
             try {
               const fileText = await fetchGitHubFileText(config, jsonPath);
               const meta = JSON.parse(fileText);
               if (meta && meta.id) {
-                results.push({
+                trackMap.set(String(meta.id), {
                   meta,
                   audioFilePath: `${folder}/${meta.id}.m4a`,
                   audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
@@ -482,14 +466,38 @@ export async function fetchTracksFromGitHub(
               }
             } catch (_) {}
           }
-
-          if (results.length > 0) {
-            return results;
-          }
         }
       }
     } catch (treeErr) {
       console.warn("Git Trees API scan failed:", treeErr);
+    }
+
+    // 2. Also check tracks.json master index to complement any missing tracks
+    const indexFilePath = `${folder}/tracks.json`;
+    try {
+      const indexText = await fetchGitHubFileText(config, indexFilePath);
+      if (indexText && indexText.trim()) {
+        const trackList = JSON.parse(indexText) as any[];
+        if (Array.isArray(trackList)) {
+          for (const meta of trackList) {
+            if (meta && meta.id && !trackMap.has(String(meta.id))) {
+              trackMap.set(String(meta.id), {
+                meta,
+                audioFilePath: `${folder}/${meta.id}.m4a`,
+                audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    if (trackMap.size > 0) {
+      const resultList = Array.from(trackMap.values());
+      onProgress?.(`合計 ${resultList.length}曲のデータ情報を取得完了！`);
+      return resultList;
     }
   }
 
