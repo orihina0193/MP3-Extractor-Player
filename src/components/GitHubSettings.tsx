@@ -26,7 +26,9 @@ import {
   uploadTrackToGitHub,
   uploadSourceCodeToGitHub,
   isGitHubConfigured,
-  getGitHubRemoteTrackIds
+  getGitHubRemoteTrackIds,
+  fetchGitHubFileBlob,
+  rebuildAndUploadMasterIndex
 } from "../lib/githubSync";
 
 import { getTracks, saveTrack, findDuplicateTrack } from "../lib/db";
@@ -44,6 +46,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   
   const [skipDuplicatesOnPush, setSkipDuplicatesOnPush] = useState(true);
+  const [forceOverwriteOnPull, setForceOverwriteOnPull] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<string>("");
   const [fetching, setFetching] = useState(false);
@@ -197,6 +200,23 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         }
       }
 
+      // 最後に全楽曲のマスターインデックス (tracks.json) をGitHubへ作成・上書き更新
+      try {
+        const allMetas = localTracks.map((t) => ({
+          id: t.id,
+          title: t.title,
+          artist: t.artist || "不明なアーティスト",
+          genre: t.genre || "邦楽",
+          youtubeUrl: t.youtubeUrl || "",
+          addedAt: t.addedAt || Date.now(),
+          audioFileName: `${t.id}.m4a`,
+          audioUrl: `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch || "main"}/audio/${t.id}.m4a`
+        }));
+        await rebuildAndUploadMasterIndex(config, allMetas, (m) => setSyncProgress(m));
+      } catch (indexErr) {
+        console.warn("マスターインデックスの更新失敗:", indexErr);
+      }
+
       showMsg(
         `一括同期完了: 全${localTracks.length}曲中 ${successCount}曲をGitHubに保管・更新しました！${
           skippedCount > 0 ? ` (${skippedCount}曲は同期済みのためスキップ)` : ""
@@ -237,6 +257,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       const existingTracks = await getTracks();
       let importedCount = 0;
       let skippedCount = 0;
+      let failedCount = 0;
 
       for (let i = 0; i < cloudTracks.length; i++) {
         const item = cloudTracks[i];
@@ -247,55 +268,72 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
           continue;
         }
 
-        const duplicate = findDuplicateTrack(
-          {
-            id: meta.id,
-            title: meta.title || "GitHub Audio",
-            artist: meta.artist,
-            youtubeUrl: meta.youtubeUrl,
-          },
-          existingTracks
-        );
+        if (!forceOverwriteOnPull) {
+          const duplicate = findDuplicateTrack(
+            {
+              id: meta.id,
+              title: meta.title || "GitHub Audio",
+              artist: meta.artist,
+              youtubeUrl: meta.youtubeUrl,
+            },
+            existingTracks
+          );
 
-        if (duplicate) {
-          setFetchProgress(`[${i + 1}/${cloudTracks.length}] スキップ (ローカル保存済み): 「${meta.title || meta.id}」`);
-          skippedCount++;
-          await new Promise((r) => setTimeout(r, 10));
-          continue;
+          if (duplicate) {
+            setFetchProgress(`[${i + 1}/${cloudTracks.length}] スキップ (ローカル保存済み): 「${meta.title || meta.id}」`);
+            skippedCount++;
+            await new Promise((r) => setTimeout(r, 10));
+            continue;
+          }
         }
 
-        setFetchProgress(`[${i + 1}/${cloudTracks.length}] 「${meta.title || meta.id}」の音声をダウンロード中...`);
+        setFetchProgress(`[${i + 1}/${cloudTracks.length}] 「${meta.title || meta.id}」の音声をGitHubからダウンロード中...`);
 
-        if (item.audioBlobUrl) {
+        const audioFilePath = item.audioFilePath || `audio/${meta.id}.m4a`;
+
+        try {
+          // GitHub PATヘッダー付きで安全に音声Blobを取得 (プライベートリポジトリにも完全対応)
+          let blob: Blob | null = null;
           try {
-            const res = await fetch(item.audioBlobUrl);
-            if (res.ok) {
-              const blob = await res.blob();
-              const newTrack: Track = {
-                id: meta.id,
-                title: meta.title || "GitHub Audio",
-                artist: meta.artist || "不明なアーティスト",
-                genre: meta.genre || "邦楽",
-                youtubeUrl: meta.youtubeUrl || "",
-                addedAt: meta.addedAt || Date.now(),
-                blob: new Blob([blob], { type: "audio/mp4" }),
-                githubUrl: item.audioBlobUrl,
-              };
-              await saveTrack(newTrack);
-              existingTracks.push(newTrack);
-              importedCount++;
+            blob = await fetchGitHubFileBlob(config, audioFilePath);
+          } catch (blobErr) {
+            if (item.audioBlobUrl) {
+              const res = await fetch(item.audioBlobUrl);
+              if (res.ok) {
+                blob = await res.blob();
+              }
             }
-          } catch (dlErr) {
-            console.warn(`Failed to download audio for track ${meta.id}:`, dlErr);
           }
+
+          if (blob && blob.size > 0) {
+            const newTrack: Track = {
+              id: meta.id,
+              title: meta.title || "GitHub Audio",
+              artist: meta.artist || "不明なアーティスト",
+              genre: meta.genre || "邦楽",
+              youtubeUrl: meta.youtubeUrl || "",
+              addedAt: meta.addedAt || Date.now(),
+              blob: new Blob([blob], { type: "audio/mp4" }),
+              githubUrl: `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch || "main"}/${audioFilePath}`,
+            };
+            await saveTrack(newTrack);
+            existingTracks.push(newTrack);
+            importedCount++;
+          } else {
+            console.warn(`0バイトまたは音声Blobの取得失敗: ${meta.id}`);
+            failedCount++;
+          }
+        } catch (dlErr) {
+          console.warn(`Failed to download audio for track ${meta.id}:`, dlErr);
+          failedCount++;
         }
       }
 
       showMsg(
         `クラウドからの取り込み完了: 全${cloudTracks.length}曲中 ${importedCount}曲を新たにローカルへ保存しました！${
           skippedCount > 0 ? ` (${skippedCount}曲は保存済みのためスキップ)` : ""
-        }`,
-        "success"
+        }${failedCount > 0 ? ` (${failedCount}曲音声ダウンロード失敗)` : ""}`,
+        importedCount > 0 || skippedCount > 0 ? "success" : "error"
       );
       onRefresh();
     } catch (err: any) {
@@ -528,6 +566,35 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
             <span
               className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-black transition-transform ${
                 skipDuplicatesOnPush ? "translate-x-6 bg-black font-bold" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="bg-black/30 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <p className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+              <span>クラウド取り込み時にローカル楽曲を強制上書き</span>
+              {forceOverwriteOnPull ? (
+                <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono">強制全件取り込み</span>
+              ) : (
+                <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.2 rounded font-mono">未保存曲のみ追加</span>
+              )}
+            </p>
+            <p className="text-[10px] text-slate-400 font-sans">
+              オンにすると、既存曲の重複チェックをスキップし、GitHub上の全171+曲をローカルへ全件強制上書き同期・復元します。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setForceOverwriteOnPull(!forceOverwriteOnPull)}
+            className={`w-12 h-6 rounded-full transition-colors relative cursor-pointer flex-shrink-0 ${
+              forceOverwriteOnPull ? "bg-[#FF5F1F]" : "bg-white/20"
+            }`}
+          >
+            <span
+              className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-black transition-transform ${
+                forceOverwriteOnPull ? "translate-x-6 bg-black font-bold" : "translate-x-0"
               }`}
             />
           </button>
