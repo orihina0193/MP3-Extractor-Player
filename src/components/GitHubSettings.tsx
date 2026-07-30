@@ -15,7 +15,8 @@ import {
   ExternalLink,
   ShieldCheck,
   Eye,
-  EyeOff
+  EyeOff,
+  Sun
 } from "lucide-react";
 import {
   getGitHubConfig,
@@ -30,6 +31,7 @@ import {
 
 import { getTracks, saveTrack, findDuplicateTrack } from "../lib/db";
 import { Track, GitHubConfig } from "../types";
+import { requestWakeLock, releaseWakeLock } from "../lib/wakeLock";
 
 interface GitHubSettingsProps {
   onRefresh: () => void;
@@ -41,6 +43,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   
+  const [skipDuplicatesOnPush, setSkipDuplicatesOnPush] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<string>("");
   const [fetching, setFetching] = useState(false);
@@ -66,9 +69,11 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
     }
 
     setSyncingSource(true);
-    setSourceProgress("ソースコードを準備中...");
+    setSourceProgress("スリープ防止を設定中...");
+    await requestWakeLock();
 
     try {
+      setSourceProgress("ソースコードを準備中...");
       // Collect current raw source code files via API to avoid Vite dev-server transformation
       const sourceFiles = [
         "package.json",
@@ -83,6 +88,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         "src/lib/audioHelper.ts",
         "src/lib/backup.ts",
         "src/lib/githubSync.ts",
+        "src/lib/wakeLock.ts",
         "src/components/Player.tsx",
         "src/components/Extractor.tsx",
         "src/components/BackupRestore.tsx",
@@ -115,11 +121,11 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
     } catch (err: any) {
       showMsg("ソースコードの同期中にエラーが発生しました: " + err.message, "error");
     } finally {
+      await releaseWakeLock();
       setSyncingSource(false);
       setSourceProgress("");
     }
   };
-
 
   const handleTestConnection = async () => {
     setTesting(true);
@@ -147,7 +153,8 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
     }
 
     setSyncing(true);
-    setSyncProgress("ローカルライブラリの楽曲を取得中...");
+    setSyncProgress("スリープ防止を設定中...");
+    await requestWakeLock();
 
     try {
       const localTracks = await getTracks();
@@ -157,30 +164,32 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         return;
       }
 
-      setSyncProgress("GitHub上の保存済み楽曲を確認中...");
+      setSyncProgress("GitHub上の既存データを確認中...");
       const remoteTrackIds = await getGitHubRemoteTrackIds(config);
       const remoteSet = new Set(remoteTrackIds);
 
-      // まだGitHubに同期されていない楽曲のみを抽出
-      const unSyncedTracks = localTracks.filter((t) => !remoteSet.has(t.id));
-
-      if (unSyncedTracks.length === 0) {
-        showMsg(`全てのローカル楽曲 (${localTracks.length}曲) は既にGitHubに同期・保管済みです。`, "info");
-        setSyncing(false);
-        setSyncProgress("");
-        return;
-      }
-
       let successCount = 0;
+      let skippedCount = 0;
       let failCount = 0;
 
-      for (let i = 0; i < unSyncedTracks.length; i++) {
-        const track = unSyncedTracks[i];
-        setSyncProgress(`[${i + 1}/${unSyncedTracks.length}] 「${track.title}」をGitHubへアップロード中...`);
+      for (let i = 0; i < localTracks.length; i++) {
+        const track = localTracks[i];
+        
+        // 重複スキップが有効かつ、すでにGitHub上に存在する場合
+        if (skipDuplicatesOnPush && remoteSet.has(track.id)) {
+          setSyncProgress(`[${i + 1}/${localTracks.length}] スキップ (GitHub保存済み): 「${track.title}」`);
+          skippedCount++;
+          // UIプログレスの更新を見やすくするため極小ディレイ
+          await new Promise((r) => setTimeout(r, 10));
+          continue;
+        }
+
+        setSyncProgress(`[${i + 1}/${localTracks.length}] 「${track.title}」をGitHubへアップロード中...`);
         try {
           await uploadTrackToGitHub(track, config, (stepMsg) => {
-            setSyncProgress(`[${i + 1}/${unSyncedTracks.length}] ${stepMsg}`);
+            setSyncProgress(`[${i + 1}/${localTracks.length}] ${stepMsg}`);
           });
+          remoteSet.add(track.id);
           successCount++;
         } catch (err: any) {
           console.error(`Failed to sync track ${track.id}:`, err);
@@ -188,17 +197,17 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         }
       }
 
-      const skippedCount = localTracks.length - unSyncedTracks.length;
       showMsg(
-        `一括同期完了: 未保存の ${unSyncedTracks.length}曲中 ${successCount}曲をGitHubに保管しました！${
+        `一括同期完了: 全${localTracks.length}曲中 ${successCount}曲をGitHubに保管・更新しました！${
           skippedCount > 0 ? ` (${skippedCount}曲は同期済みのためスキップ)` : ""
         }${failCount > 0 ? ` (${failCount}曲エラー)` : ""}`,
-        successCount > 0 ? "success" : "info"
+        successCount > 0 || skippedCount > 0 ? "success" : "error"
       );
       onRefresh();
     } catch (err: any) {
       showMsg("GitHub一括同期中にエラーが発生しました: " + err.message, "error");
     } finally {
+      await releaseWakeLock();
       setSyncing(false);
       setSyncProgress("");
     }
@@ -211,7 +220,8 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
     }
 
     setFetching(true);
-    setFetchProgress("GitHubから楽曲一覧を取得中...");
+    setFetchProgress("スリープ防止を設定中...");
+    await requestWakeLock();
 
     try {
       const cloudTracks = await fetchTracksFromGitHub(config, (stepMsg) => {
@@ -225,13 +235,19 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       }
 
       const existingTracks = await getTracks();
+      let importedCount = 0;
+      let skippedCount = 0;
 
-      // ローカルストレージに未保存の新規楽曲のみを事前に抽出
-      const newCloudTracks = cloudTracks.filter((item) => {
+      for (let i = 0; i < cloudTracks.length; i++) {
+        const item = cloudTracks[i];
         const meta = item.meta;
-        if (!meta || !meta.id) return false;
 
-        const isDup = findDuplicateTrack(
+        if (!meta || !meta.id) {
+          skippedCount++;
+          continue;
+        }
+
+        const duplicate = findDuplicateTrack(
           {
             id: meta.id,
             title: meta.title || "GitHub Audio",
@@ -240,28 +256,15 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
           },
           existingTracks
         );
-        return !isDup;
-      });
 
-      const skippedCount = cloudTracks.length - newCloudTracks.length;
+        if (duplicate) {
+          setFetchProgress(`[${i + 1}/${cloudTracks.length}] スキップ (ローカル保存済み): 「${meta.title || meta.id}」`);
+          skippedCount++;
+          await new Promise((r) => setTimeout(r, 10));
+          continue;
+        }
 
-      if (newCloudTracks.length === 0) {
-        showMsg(
-          `全${cloudTracks.length}曲のデータは既にローカルストレージに保存されています。（新規追加 0曲）`,
-          "info"
-        );
-        setFetching(false);
-        setFetchProgress("");
-        return;
-      }
-
-      let importedCount = 0;
-
-      for (let i = 0; i < newCloudTracks.length; i++) {
-        const item = newCloudTracks[i];
-        const meta = item.meta;
-
-        setFetchProgress(`[${i + 1}/${newCloudTracks.length}] 「${meta.title || meta.id}」の音声を取得中...`);
+        setFetchProgress(`[${i + 1}/${cloudTracks.length}] 「${meta.title || meta.id}」の音声をダウンロード中...`);
 
         if (item.audioBlobUrl) {
           try {
@@ -289,7 +292,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       }
 
       showMsg(
-        `クラウドからの取り込み完了: 未保存の ${newCloudTracks.length}曲中 ${importedCount}曲を新たにローカルへ保存しました！${
+        `クラウドからの取り込み完了: 全${cloudTracks.length}曲中 ${importedCount}曲を新たにローカルへ保存しました！${
           skippedCount > 0 ? ` (${skippedCount}曲は保存済みのためスキップ)` : ""
         }`,
         "success"
@@ -298,6 +301,7 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
     } catch (err: any) {
       showMsg("GitHubからの読み込み中にエラーが発生しました: " + err.message, "error");
     } finally {
+      await releaseWakeLock();
       setFetching(false);
       setFetchProgress("");
     }
@@ -477,26 +481,62 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       </div>
 
       {/* Auto Sync Toggle Option */}
-      <div className="bg-black/30 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
-        <div className="space-y-0.5">
-          <p className="text-xs font-bold text-slate-200">抽出・追加時の自動GitHub同期</p>
-          <p className="text-[10px] text-slate-400 font-sans">
-            新しい曲を抽出・保存した際、バックグラウンドで自動的に指定のGitHubリポジトリへコミット保存します。
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setConfig({ ...config, autoSync: !config.autoSync })}
-          className={`w-12 h-6 rounded-full transition-colors relative cursor-pointer flex-shrink-0 ${
-            config.autoSync ? "bg-[#FF5F1F]" : "bg-white/20"
-          }`}
-        >
-          <span
-            className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-black transition-transform ${
-              config.autoSync ? "translate-x-6 bg-black font-bold" : "translate-x-0"
+      <div className="space-y-3">
+        <div className="bg-black/30 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <p className="text-xs font-bold text-slate-200">抽出・追加時の自動GitHub同期</p>
+            <p className="text-[10px] text-slate-400 font-sans">
+              新しい曲を抽出・保存した際、バックグラウンドで自動的に指定のGitHubリポジトリへコミット保存します。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setConfig({ ...config, autoSync: !config.autoSync })}
+            className={`w-12 h-6 rounded-full transition-colors relative cursor-pointer flex-shrink-0 ${
+              config.autoSync ? "bg-[#FF5F1F]" : "bg-white/20"
             }`}
-          />
-        </button>
+          >
+            <span
+              className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-black transition-transform ${
+                config.autoSync ? "translate-x-6 bg-black font-bold" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="bg-black/30 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
+          <div className="space-y-0.5">
+            <p className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+              <span>一括同期時に既存楽曲の送信をスキップ</span>
+              {skipDuplicatesOnPush ? (
+                <span className="text-[9px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.2 rounded font-mono">スキップ有効</span>
+              ) : (
+                <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded font-mono">全件上書き更新</span>
+              )}
+            </p>
+            <p className="text-[10px] text-slate-400 font-sans">
+              オンにするとGitHub上に既に存在するIDの曲をスキップします。オフにするとローカルの全曲をGitHubへ上書き再送信・更新します。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSkipDuplicatesOnPush(!skipDuplicatesOnPush)}
+            className={`w-12 h-6 rounded-full transition-colors relative cursor-pointer flex-shrink-0 ${
+              skipDuplicatesOnPush ? "bg-[#FF5F1F]" : "bg-white/20"
+            }`}
+          >
+            <span
+              className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-black transition-transform ${
+                skipDuplicatesOnPush ? "translate-x-6 bg-black font-bold" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 p-3 rounded-xl text-[11px] font-mono text-amber-300">
+          <Sun className="w-4 h-4 flex-shrink-0 text-amber-400" />
+          <span>📱 一括同期・ダウンロード実行中は画面スリープ（ロック・消灯）を自動的に防止します。</span>
+        </div>
       </div>
 
       {/* Connection Test & Status Feedback */}
