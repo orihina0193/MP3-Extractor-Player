@@ -1,6 +1,6 @@
 import React, { useState, useRef } from "react";
 import { Youtube, Search, ArrowRight, CheckCircle2, AlertCircle, Loader2, Music4, X, Github } from "lucide-react";
-import { saveTrack, getTracks } from "../lib/db";
+import { saveTrack, getTracks, findDuplicateTrack } from "../lib/db";
 import { Track } from "../types";
 import { detectMimeType } from "../lib/audioHelper";
 import { getGitHubConfig, isGitHubConfigured, uploadTrackToGitHub } from "../lib/githubSync";
@@ -304,8 +304,21 @@ export default function Extractor({ onRefresh }: ExtractorProps) {
       setStep("ブラウザの安全なキャッシュ（IndexedDB）に書き込み中...");
 
       const existingTracks = await getTracks();
-      const isDuplicate = existingTracks.some((t) => t.id === stagedData.id);
-      const trackId = isDuplicate ? `${stagedData.id}_${Date.now()}` : stagedData.id;
+      const duplicate = findDuplicateTrack({
+        id: stagedData.id,
+        title: editedTitle.trim() || stagedData.title,
+        artist: editedArtist.trim() || stagedData.artist || "不明なアーティスト",
+        youtubeUrl: stagedData.youtubeUrl,
+      }, existingTracks);
+
+      if (duplicate) {
+        setIsSaving(false);
+        setStep("");
+        setError(`「${duplicate.title}」（${duplicate.artist || "不明なアーティスト"}）は既にストレージに保存されているため、重複保存をスキップしました。`);
+        return;
+      }
+
+      const trackId = stagedData.id;
 
       const newTrack: Track = {
         id: trackId,
