@@ -2,6 +2,7 @@ import React, { useState, useRef } from "react";
 import { Download, Upload, Trash2, AlertTriangle, Loader2, RefreshCw, FileAudio } from "lucide-react";
 import { exportBackup, importBackup, importExternalBackup } from "../lib/backup";
 import { clearAllTracks } from "../lib/db";
+import { requestWakeLock, releaseWakeLock } from "../lib/wakeLock";
 
 interface BackupRestoreProps {
   onRefresh: () => void;
@@ -76,6 +77,7 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
     if (!file) return;
 
     setIsImporting(true);
+    await requestWakeLock();
     try {
       const result = await importBackup(file);
       const skipText = result.skippedCount > 0 ? ` (${result.skippedCount}個は重複のためスキップ)` : "";
@@ -85,6 +87,7 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
       console.error(err);
       showMsg("復元に失敗しました。ZIPファイルが正しいバックアップであることを確認してください。" + err.message, "error");
     } finally {
+      await releaseWakeLock();
       setIsImporting(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -99,6 +102,7 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
     setIsConverting(true);
     setConvertedZipBlob(null);
     setConversionProgress(null);
+    await requestWakeLock();
     try {
       const result = await importExternalBackup(file, (current, total) => {
         setConversionProgress({ current, total });
@@ -114,6 +118,7 @@ export default function BackupRestore({ onRefresh }: BackupRestoreProps) {
       console.error(err);
       showMsg("他アプリZIPの変換に失敗しました: " + err.message, "error");
     } finally {
+      await releaseWakeLock();
       setIsConverting(false);
       setConversionProgress(null);
       if (externalFileInputRef.current) {
