@@ -1,14 +1,7 @@
-export interface Track {
-  id: string;
-  title: string;
-  artist?: string;
-  youtubeUrl?: string;
-  blob: Blob;
-  addedAt: number;
-  genre?: "邦楽" | "洋楽";
-}
+export var AppMode = /* @__PURE__ */ ((AppMode2) => {
+  AppMode2["Extract"] = "extract";
+  AppMode2["Play"] = "play";
+  return AppMode2;
+})(AppMode || {});
 
-export enum AppMode {
-  Extract = "extract",
-  Play = "play"
-}
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbInR5cGVzLnRzIl0sInNvdXJjZXNDb250ZW50IjpbImV4cG9ydCBpbnRlcmZhY2UgVHJhY2sge1xuICBpZDogc3RyaW5nO1xuICB0aXRsZTogc3RyaW5nO1xuICBhcnRpc3Q/OiBzdHJpbmc7XG4gIHlvdXR1YmVVcmw/OiBzdHJpbmc7XG4gIGJsb2I6IEJsb2I7XG4gIGFkZGVkQXQ6IG51bWJlcjtcbiAgZ2VucmU/OiBcIumCpualvVwiIHwgXCLmtIvmpb1cIjtcbiAgZ2l0aHViU2hhPzogc3RyaW5nO1xuICBnaXRodWJBdWRpb1NoYT86IHN0cmluZztcbiAgZ2l0aHViVXJsPzogc3RyaW5nO1xuICBpc0Nsb3VkT25seT86IGJvb2xlYW47XG59XG5cbmV4cG9ydCBpbnRlcmZhY2UgR2l0SHViQ29uZmlnIHtcbiAgcGF0OiBzdHJpbmc7XG4gIG93bmVyOiBzdHJpbmc7XG4gIHJlcG86IHN0cmluZztcbiAgZm9sZGVyOiBzdHJpbmc7XG4gIGJyYW5jaDogc3RyaW5nO1xuICBhdXRvU3luYzogYm9vbGVhbjtcbn1cblxuZXhwb3J0IGVudW0gQXBwTW9kZSB7XG4gIEV4dHJhY3QgPSBcImV4dHJhY3RcIixcbiAgUGxheSA9IFwicGxheVwiXG59XG5cbiJdLCJtYXBwaW5ncyI6IkFBdUJPLFdBQUssVUFBTCxrQkFBS0EsYUFBTDtBQUNMLEVBQUFBLFNBQUEsYUFBVTtBQUNWLEVBQUFBLFNBQUEsVUFBTztBQUZHLFNBQUFBO0FBQUEsR0FBQTsiLCJuYW1lcyI6WyJBcHBNb2RlIl19
