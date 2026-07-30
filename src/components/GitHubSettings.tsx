@@ -24,7 +24,8 @@ import {
   fetchTracksFromGitHub,
   uploadTrackToGitHub,
   uploadSourceCodeToGitHub,
-  isGitHubConfigured
+  isGitHubConfigured,
+  getGitHubRemoteTrackIds
 } from "../lib/githubSync";
 
 import { getTracks, saveTrack } from "../lib/db";
@@ -139,14 +140,14 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
     }
   };
 
-  const handleSyncAllToGitHub = async () => {
+  const handleSyncAllToGitHub = async (forceAll: boolean = false) => {
     if (!isGitHubConfigured(config)) {
       showMsg("先にGitHub PAT、ユーザー名、リポジトリ名を設定・保存してください。", "error");
       return;
     }
 
     setSyncing(true);
-    setSyncProgress("ローカルライブラリの楽曲を取得中...");
+    setSyncProgress("GitHub上の保存済みデータをチェック中...");
 
     try {
       const localTracks = await getTracks();
@@ -156,15 +157,40 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
         return;
       }
 
+      // 1. GitHub上にすでに保存されている曲IDを取得
+      const remoteTrackIds = await getGitHubRemoteTrackIds(config);
+
+      // 2. 未保存の楽曲のみを差分抽出 (forceAll指定がない場合)
+      const tracksToUpload = forceAll
+        ? localTracks
+        : localTracks.filter((track) => !remoteTrackIds.has(track.id));
+
+      const alreadySavedCount = localTracks.length - tracksToUpload.length;
+
+      if (tracksToUpload.length === 0) {
+        showMsg(
+          `全${localTracks.length}曲中、すでに${alreadySavedCount}曲がGitHubに保存済みです！新たに同期する未保存の曲はありません。`,
+          "success"
+        );
+        setSyncing(false);
+        setSyncProgress("");
+        return;
+      }
+
+      showMsg(
+        `全${localTracks.length}曲中、保存済みの${alreadySavedCount}曲をスキップし、未保存の${tracksToUpload.length}曲のみ同期を開始します。`,
+        "info"
+      );
+
       let successCount = 0;
       let failCount = 0;
 
-      for (let i = 0; i < localTracks.length; i++) {
-        const track = localTracks[i];
-        setSyncProgress(`[${i + 1}/${localTracks.length}] 「${track.title}」をGitHubへアップロード中...`);
+      for (let i = 0; i < tracksToUpload.length; i++) {
+        const track = tracksToUpload[i];
+        setSyncProgress(`[${i + 1}/${tracksToUpload.length}] 「${track.title}」をGitHubへアップロード中...`);
         try {
           await uploadTrackToGitHub(track, config, (stepMsg) => {
-            setSyncProgress(`[${i + 1}/${localTracks.length}] ${stepMsg}`);
+            setSyncProgress(`[${i + 1}/${tracksToUpload.length}] ${stepMsg}`);
           });
           successCount++;
         } catch (err: any) {
@@ -174,9 +200,9 @@ export default function GitHubSettings({ onRefresh }: GitHubSettingsProps) {
       }
 
       showMsg(
-        `一括同期完了: ${localTracks.length}曲中 ${successCount}曲をGitHubに正常保存しました！${
-          failCount > 0 ? ` (${failCount}曲エラー)` : ""
-        }`,
+        `同期完了: 未保存${tracksToUpload.length}曲中 ${successCount}曲をGitHubに正常保存しました！${
+          alreadySavedCount > 0 ? ` (${alreadySavedCount}曲はスキップ済み)` : ""
+        }${failCount > 0 ? ` (${failCount}曲エラー)` : ""}`,
         successCount > 0 ? "success" : "error"
       );
       onRefresh();
