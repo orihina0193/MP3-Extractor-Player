@@ -58,6 +58,122 @@ function cleanFolder(folder?: string): string {
 }
 
 /**
+ * Fetch raw file binary blob from GitHub repository safely (supports both Public and Private repos with PAT)
+ */
+export async function fetchGitHubFileBlob(
+  config: GitHubConfig,
+  filePath: string
+): Promise<Blob> {
+  const cleanPath = filePath.replace(/^\/+/, "");
+  const apiUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${cleanPath}?ref=${config.branch || "main"}`;
+  
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.v3.raw",
+  };
+  if (config.pat && config.pat.trim()) {
+    headers.Authorization = `Bearer ${config.pat.trim()}`;
+  }
+
+  try {
+    const res = await fetch(apiUrl, { headers });
+    if (res.ok) {
+      return await res.blob();
+    }
+  } catch (e) {
+    console.warn(`API raw fetch failed for ${filePath}, trying fallback:`, e);
+  }
+
+  // Fallback to raw.githubusercontent.com (for public repos)
+  const rawUrl = `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch || "main"}/${cleanPath}`;
+  const rawRes = await fetch(rawUrl);
+  if (rawRes.ok) {
+    return await rawRes.blob();
+  }
+
+  throw new Error(`音声ファイル「${filePath}」のダウンロードに失敗しました。PAT権限を確認してください。`);
+}
+
+/**
+ * Fetch text content from GitHub repository safely
+ */
+export async function fetchGitHubFileText(
+  config: GitHubConfig,
+  filePath: string
+): Promise<string> {
+  const cleanPath = filePath.replace(/^\/+/, "");
+  const apiUrl = `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${cleanPath}?ref=${config.branch || "main"}`;
+  
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github.v3.raw",
+  };
+  if (config.pat && config.pat.trim()) {
+    headers.Authorization = `Bearer ${config.pat.trim()}`;
+  }
+
+  try {
+    const res = await fetch(apiUrl, { headers });
+    if (res.ok) {
+      return await res.text();
+    }
+  } catch (e) {
+    console.warn(`API text fetch failed for ${filePath}, trying fallback:`, e);
+  }
+
+  const rawUrl = `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch || "main"}/${cleanPath}`;
+  const rawRes = await fetch(rawUrl);
+  if (rawRes.ok) {
+    return await rawRes.text();
+  }
+
+  throw new Error(`情報ファイル「${filePath}」の取得に失敗しました。`);
+}
+
+/**
+  Rebuild and upload master index tracks.json from a full list of track metadata
+ */
+export async function rebuildAndUploadMasterIndex(
+  config: GitHubConfig,
+  trackMetas: any[],
+  onProgress?: (msg: string) => void
+): Promise<void> {
+  if (!isGitHubConfigured(config)) return;
+  const folder = cleanFolder(config.folder);
+  const indexFilePath = `${folder}/tracks.json`;
+
+  onProgress?.("マスターインデックス (tracks.json) をGitHubへ作成・保存中...");
+
+  const indexSha = await getFileSha(config, indexFilePath);
+  const indexJsonStr = JSON.stringify(trackMetas, null, 2);
+  const indexBase64 = btoa(unescape(encodeURIComponent(indexJsonStr)));
+
+  const payload: any = {
+    message: `Rebuild master track index (${trackMetas.length} tracks) [SoundBox]`,
+    content: indexBase64,
+    branch: config.branch || "main",
+  };
+  if (indexSha) {
+    payload.sha = indexSha;
+  }
+
+  const res = await fetch(
+    `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${indexFilePath}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${config.pat.trim()}`,
+        "Content-Type": "application/json",
+        Accept: "application/vnd.github.v3+json",
+      },
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!res.ok) {
+    console.warn("Failed to update tracks.json master index:", await res.json().catch(() => ({})));
+  }
+}
+
+/**
   Test GitHub connection and verify PAT/Repo access
  */
 export async function testGitHubConnection(config: GitHubConfig): Promise<{ success: boolean; message: string }> {
@@ -285,12 +401,12 @@ async function updateGitHubMasterIndex(
 }
 
 /**
- Fetch all track metadata from GitHub repository
+ Fetch all track metadata from GitHub repository (handles 100+ tracks and private repos safely)
  */
 export async function fetchTracksFromGitHub(
   config: GitHubConfig,
   onProgress?: (msg: string) => void
-): Promise<Array<{ meta: any; audioBlobUrl?: string }>> {
+): Promise<Array<{ meta: any; audioFilePath?: string; audioBlobUrl?: string }>> {
   if (!isGitHubConfigured(config)) {
     throw new Error("GitHub設定が必要です。");
   }
@@ -303,10 +419,28 @@ export async function fetchTracksFromGitHub(
 
     onProgress?.(`GitHubリポジトリ (${folder}/) からインデックスを取得中...`);
 
-    // 1. Try reading tracks.json first
+    // 1. Try reading master tracks.json using fetchGitHubFileText (supports >1MB files)
     try {
-      const res = await fetch(
-        `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${indexFilePath}?ref=${config.branch}`,
+      const indexText = await fetchGitHubFileText(config, indexFilePath);
+      if (indexText && indexText.trim()) {
+        const trackList = JSON.parse(indexText) as any[];
+        if (Array.isArray(trackList) && trackList.length > 0) {
+          return trackList.map((meta) => ({
+            meta,
+            audioFilePath: `${folder}/${meta.id}.m4a`,
+            audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
+          }));
+        }
+      }
+    } catch (e) {
+      console.warn(`tracks.json read/parse failed in ${folder}/, switching to Git Trees API scan...`, e);
+    }
+
+    // 2. Git Trees API scan fallback (retrieves full file list in 1 API call without directory truncation)
+    try {
+      onProgress?.(`GitHubツリー構造を取得中 (${folder}/)...`);
+      const treeRes = await fetch(
+        `https://api.github.com/repos/${config.owner}/${config.repo}/git/trees/${config.branch || "main"}?recursive=1`,
         {
           headers: {
             Authorization: `Bearer ${config.pat.trim()}`,
@@ -315,59 +449,47 @@ export async function fetchTracksFromGitHub(
         }
       );
 
-      if (res.ok) {
-        const data = await res.json();
-        const contentUtf8 = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ""))));
-        const trackList = JSON.parse(contentUtf8) as any[];
-        if (trackList.length > 0) {
-          return trackList.map((meta) => ({
-            meta,
-            audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
-          }));
+      if (treeRes.ok) {
+        const treeData = await treeRes.json();
+        const tree: Array<{ path: string; type: string }> = treeData.tree || [];
+
+        // Filter json metadata files in target folder
+        const targetJsonPaths = tree
+          .filter(
+            (item) =>
+              item.type === "blob" &&
+              item.path.startsWith(`${folder}/`) &&
+              item.path.endsWith(".json") &&
+              !item.path.endsWith("tracks.json")
+          )
+          .map((item) => item.path);
+
+        if (targetJsonPaths.length > 0) {
+          const results: Array<{ meta: any; audioFilePath?: string; audioBlobUrl?: string }> = [];
+
+          for (let i = 0; i < targetJsonPaths.length; i++) {
+            const jsonPath = targetJsonPaths[i];
+            onProgress?.(`[${i + 1}/${targetJsonPaths.length}] 楽曲メタデータを取得中...`);
+            try {
+              const fileText = await fetchGitHubFileText(config, jsonPath);
+              const meta = JSON.parse(fileText);
+              if (meta && meta.id) {
+                results.push({
+                  meta,
+                  audioFilePath: `${folder}/${meta.id}.m4a`,
+                  audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
+                });
+              }
+            } catch (_) {}
+          }
+
+          if (results.length > 0) {
+            return results;
+          }
         }
       }
-    } catch (e) {
-      console.warn(`tracks.json not found in ${folder}/, trying directory scan...`, e);
-    }
-
-    // 2. Directory scan fallback
-    onProgress?.(`フォルダ (${folder}/) 内のファイル一覧を取得中...`);
-    const dirRes = await fetch(
-      `https://api.github.com/repos/${config.owner}/${config.repo}/contents/${folder}?ref=${config.branch}`,
-      {
-        headers: {
-          Authorization: `Bearer ${config.pat.trim()}`,
-          Accept: "application/vnd.github.v3+json",
-        },
-      }
-    );
-
-    if (dirRes.ok) {
-      const items = (await dirRes.json()) as any[];
-      const jsonFiles = items.filter((item) => item.name.endsWith(".json") && item.name !== "tracks.json");
-
-      if (jsonFiles.length > 0) {
-        const results: Array<{ meta: any; audioBlobUrl?: string }> = [];
-
-        for (const file of jsonFiles) {
-          try {
-            const fileRes = await fetch(file.download_url || file.url, {
-              headers: config.pat ? { Authorization: `Bearer ${config.pat.trim()}` } : {},
-            });
-            if (fileRes.ok) {
-              const meta = await fileRes.json();
-              results.push({
-                meta,
-                audioBlobUrl: meta.audioUrl || `https://raw.githubusercontent.com/${config.owner}/${config.repo}/${config.branch}/${folder}/${meta.id}.m4a`,
-              });
-            }
-          } catch (_) {}
-        }
-
-        if (results.length > 0) {
-          return results;
-        }
-      }
+    } catch (treeErr) {
+      console.warn("Git Trees API scan failed:", treeErr);
     }
   }
 
